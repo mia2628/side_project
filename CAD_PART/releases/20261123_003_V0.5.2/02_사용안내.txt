@@ -1,0 +1,47 @@
+CAD-PART V0.5.2 | 2026-11-23 | 배포 003
+
+원인 진단
+V0.5.1에서 E03, com_error -2147418111 (RPC_E_CALL_REJECTED)는
+AutoCAD가 Python COM 요청을 거부했을 때 발생할 수 있습니다.
+보통 AutoCAD가 도면을 여는 중이거나 대화상자/명령으로 바쁠 때 나타납니다.
+이 오류만으로 부품표 인식 문제가 해결됐다고 판단할 수 없습니다.
+
+V0.5.2 변경
+- COM 접근 재시도: RPC_E_CALL_REJECTED / RETRYLATER만 제한 시간 내 재시도
+- 도면 열기 후 0.75초, 닫기 후 0.35초 간격
+- COM 컬렉션은 Count/Item 기반으로 탐색
+- 실패 단계 기록 E31 (AutoCAD가 계속 바빠 시간초과)
+- Python 소스 실행명 cadpart_v03.py 유지
+- 자동 중단 없는 개별 도면 오류 처리
+
+폴더 (사내 승인된 프로그램/소스 사용 정책 준수)
+D:\CAD_PART\cadpart_v03.py
+D:\CAD_PART\CAD_INPUT\ (DWG 2~3개 우선)
+D:\CAD_PART\CAD_RESULT\ (실행 후 자동 생성)
+
+실행 전 확인
+1. AutoCAD 2019 실행, 명령 입력 중인 상태 아님 (Esc 2회)
+2. '열기', '저장', 외부참조 경고 등 모든 팝업 닫기
+3. 부품목록 추출 등 다른 AutoCAD 작업 종료
+4. 시험 도면 2~3개만 CAD_INPUT에 배치
+5. 승인된 절차로 소스를 실행 가능한 상태로 준비
+
+실행: python cadpart_v03.py
+가상: python cadpart_v03.py --demo
+
+결과
+CAD_RESULT/SUMMARY.json
+CAD_RESULT/VALIDATION.csv
+CAD_RESULT/DIAGNOSTICS.csv
+CAD_RESULT/PARTS_CANDIDATES.csv
+
+모바일에 보내는 피드백: 프로그램 마지막 1줄만
+예: V0.5.2|DWG3|표3|행17|검토1|E00
+가능하면 DIAGNOSTICS.csv의 임의 도면 한 행에서 숫자만 추가:
+texts_g / segments_g / anchors / grid_candidates
+(도면명, 품번, 내부 경로는 공유하지 않음)
+
+주의
+E00은 후보 존재로서 추출 정확도 인증이 아닙니다.
+블록 내부 문자/선, XREF, 기하학적 변형은 현재 지원 범위 밖입니다.
+실제 AutoCAD 2019 환경의 성공 여부는 아직 검증되지 않았습니다.
