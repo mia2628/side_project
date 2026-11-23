@@ -1,0 +1,399 @@
+# -*- coding: utf-8 -*-
+"""
+CAD-PART V0.5.1 - AutoCAD 2019 parts-list grid detection (prototype).
+Run: python cadpart_v03.py
+Demo: python cadpart_v03.py --demo
+Requires on Windows: AutoCAD 2019, Python with pywin32.
+No change is saved to DWG. Default input: CAD_INPUT, output: CAD_RESULT.
+No company data, paths or drawing contents are sent to any network.
+"""
+from __future__ import annotations
+
+import csv
+import json
+import math
+import re
+import sys
+import time
+import traceback
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+
+VERSION = "0.5.1"
+ROOT = Path(__file__).resolve().parent
+INPUT = ROOT / "CAD_INPUT"
+OUTPUT = ROOT / "CAD_RESULT"
+LAYER = "G"
+EPS = 0.12
+MAX_ENTITIES = 250000
+NUMBER_RE = re.compile(r"^\s*(\d{1,4})\s*[.)]?\s*$")
+SKIP_TEXT = {"부품목록", "도번", "작성부서", "승인부서", "주기", "수정자", "수정내용"}
+PART_COLUMNS = ("item_no", "part_name", "qpa", "part_number", "drawing_number")
+
+
+@dataclass
+class Text:
+    value: str
+    x: float
+    y: float
+    h: float = 2.5
+    layer: str = "G"
+    source: str = "MODEL"
+
+
+@dataclass
+class Line:
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    layer: str = "G"
+    source: str = "MODEL"
+
+
+def norm(v):
+    return re.sub(r"\s+", "", str(v or "")).upper()
+
+
+def number(v):
+    m = NUMBER_RE.fullmatch(str(v or ""))
+    return int(m.group(1)) if m else None
+
+
+def near(a, b, tolerance=EPS):
+    return abs(a-b) <= tolerance
+
+
+def write_csv(path, headers, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=headers, extrasaction="ignore")
+        w.writeheader()
+        for r in records:
+            w.writerow(r)
+
+
+def source_entities(doc):
+    """Read model and each paper layout separately; no flattening or editing."""
+    yield "MODEL", doc.ModelSpace
+    for layout in doc.Layouts:
+        name = str(layout.Name)
+        if name.lower() == "model":
+            continue
+        try:
+            yield "LAYOUT:" + name, layout.Block
+        except Exception:
+            continue
+
+
+def get_obj_value(obj, name, default=None):
+    try:
+        return getattr(obj, name)
+    except Exception:
+        return default
+
+
+def collect_geometry(doc):
+    texts, lines, notes = [], [], []
+    inspected = 0
+    non_g = 0
+    for space, objects in source_entities(doc):
+        for obj in objects:
+            inspected += 1
+            if inspected > MAX_ENTITIES:
+                raise RuntimeError("E11_ENTITY_LIMIT")
+            layer = str(get_obj_value(obj, "Layer", "")).strip()
+            kind = str(get_obj_value(obj, "ObjectName", ""))
+            if layer.casefold() != LAYER.casefold():
+                non_g += 1
+                continue
+            try:
+                if kind in ("AcDbText", "AcDbMText", "AcDbAttribute", "AcDbAttributeDefinition"):
+                    s = str(get_obj_value(obj, "TextString", "")).replace("\\P", " ")
+                    xyz = get_obj_value(obj, "InsertionPoint", None)
+                    if xyz is None:
+                        continue
+                    texts.append(Text(s, float(xyz[0]), float(xyz[1]),
+                                      float(get_obj_value(obj, "Height", 2.5) or 2.5),
+                                      layer, space))
+                elif kind == "AcDbLine":
+                    a = obj.StartPoint
+                    b = obj.EndPoint
+                    lines.append(Line(float(a[0]), float(a[1]), float(b[0]), float(b[1]), layer, space))
+                elif kind == "AcDbPolyline":
+                    coords = list(obj.Coordinates)
+                    points = [(float(coords[i]), float(coords[i+1])) for i in range(0, len(coords)-1, 2)]
+                    if bool(get_obj_value(obj, "Closed", False)) and len(points) > 2:
+                        points.append(points[0])
+                    for a, b in zip(points, points[1:]):
+                        lines.append(Line(a[0], a[1], b[0], b[1], layer, space))
+                elif kind == "AcDbBlockReference":
+                    notes.append("E12_BLOCK_UNREAD:" + str(get_obj_value(obj, "Name", "?")))
+                elif kind in ("AcDbExternalReference", "AcDbProxyEntity"):
+                    notes.append("E13_UNSUPPORTED:" + kind)
+            except Exception as exc:
+                notes.append("E14_OBJECT:" + kind + ":" + type(exc).__name__)
+    return texts, lines, inspected, non_g, notes
+
+
+def line_grid(lines):
+    horizontal, vertical = [], []
+    for seg in lines:
+        if abs(seg.y1-seg.y2) <= EPS and abs(seg.x1-seg.x2) > EPS*2:
+            horizontal.append((min(seg.x1, seg.x2), max(seg.x1, seg.x2), (seg.y1+seg.y2)/2, seg.source))
+        elif abs(seg.x1-seg.x2) <= EPS and abs(seg.y1-seg.y2) > EPS*2:
+            vertical.append(((seg.x1+seg.x2)/2, min(seg.y1, seg.y2), max(seg.y1, seg.y2), seg.source))
+    return horizontal, vertical
+
+
+def distinct(values, tol=EPS):
+    vals = sorted(values)
+    result = []
+    for v in vals:
+        if not result or v-result[-1] > tol:
+            result.append(v)
+    return result
+
+
+def parts_anchor(texts):
+    return [t for t in texts if "부품목록" in norm(t.value)]
+
+
+def identify_cell_grid(tx, ty, vertical, horizontal, space):
+    """
+    Infer five cell boundaries around ordinal text, not mere proximity.
+    Each vertical boundary must span the ordinal text's Y location.
+    """
+    xs = distinct([x for x, y0, y1, sp in vertical
+                   if sp == space and y0-EPS <= ty <= y1+EPS])
+    left = [x for x in xs if x <= tx+EPS]
+    right = [x for x in xs if x > tx+EPS]
+    if not left or len(right) < 5:
+        return None
+    left_edge = left[-1]
+    edges = [left_edge] + right[:5]
+    widths = [edges[i+1]-edges[i] for i in range(5)]
+    if min(widths) <= EPS*3 or max(widths) / min(widths) > 25:
+        return None
+    # At least top or bottom horizontal border must intersect all five cells.
+    supporting = [y for x0, x1, y, sp in horizontal
+                  if sp == space and x0 <= left_edge+EPS and x1 >= edges[-1]-EPS]
+    if not supporting:
+        return None
+    above = [y for y in supporting if y >= ty-EPS]
+    below = [y for y in supporting if y < ty-EPS]
+    if not above or not below:
+        return None
+    return edges, min(above), max(below)
+
+
+def find_rows(texts, lines):
+    hlines, vlines = line_grid(lines)
+    anchors = parts_anchor(texts)
+    findings, issues = [], []
+    by_space = defaultdict(list)
+    for t in texts:
+        by_space[t.source].append(t)
+    anchors_by_space = defaultdict(list)
+    for t in anchors:
+        anchors_by_space[t.source].append(t)
+    if not anchors:
+        issues.append(("E20", "PARTS_LIST_ANCHOR_NOT_FOUND"))
+        return findings, issues, {"anchors": 0, "number_candidates": 0, "grid_candidates": 0}
+    numbered = 0
+    grid_count = 0
+    seen = set()
+    for space, group in by_space.items():
+        group_anchors = anchors_by_space.get(space, [])
+        if not group_anchors:
+            continue
+        for token in group:
+            n = number(token.value)
+            if n is None or n < 1:
+                continue
+            numbered += 1
+            # Parts table is above '부품목록', including left continuation tables.
+            if not any(token.y > a.y for a in group_anchors):
+                continue
+            grid = identify_cell_grid(token.x, token.y, vlines, hlines, space)
+            if grid is None:
+                continue
+            edges, y_top, y_bottom = grid
+            grid_count += 1
+            anchor_distance = min(math.hypot(token.x-a.x, token.y-a.y) for a in group_anchors)
+            # Very distant number grids are not auto accepted.
+            xspread = edges[-1] - edges[0]
+            if anchor_distance > max(xspread * 5, 5000):
+                continue
+            key = (space, round(edges[0], 2), round(y_bottom, 2), round(y_top, 2))
+            if key in seen:
+                continue
+            seen.add(key)
+            columns = [[] for _ in range(5)]
+            for other in group:
+                if not (y_bottom-EPS <= other.y <= y_top+EPS):
+                    continue
+                for idx in range(5):
+                    if edges[idx]-EPS <= other.x < edges[idx+1]+EPS:
+                        columns[idx].append(other)
+                        break
+            cells = [" ".join(t.value.strip() for t in sorted(col, key=lambda z:(-z.y,z.x))
+                              if t.value.strip()) for col in columns]
+            if number(cells[0]) != n:
+                issues.append(("E21", "ITEM_CELL_CONFLICT:" + str(n)))
+                continue
+            # Must have a part name, and nonempty part/drawing reference.
+            if not cells[1] or not (cells[3] or cells[4]):
+                issues.append(("E22", "ROW_INCOMPLETE:" + str(n)))
+                continue
+            qpa = number(cells[2])
+            if qpa is None or qpa <= 0:
+                issues.append(("E23", "QPA_UNCERTAIN:" + str(n)))
+            findings.append({
+                "space": space, "item_no": n, "part_name": cells[1],
+                "qpa": qpa if qpa else "", "part_number": cells[3],
+                "drawing_number": cells[4], "x0": round(edges[0],3),
+                "x5": round(edges[-1],3), "y0": round(y_bottom,3),
+                "y1": round(y_top,3), "status": "CANDIDATE" if qpa else "REVIEW_REQUIRED"
+            })
+    if not findings:
+        issues.append(("E24", "GRID_ROWS_NOT_DETECTED"))
+    # Detect gaps and duplicates within columns/table groups, including left extensions.
+    nums = sorted({r["item_no"] for r in findings})
+    if nums:
+        missing = sorted(set(range(1, max(nums)+1)) - set(nums))
+        if missing:
+            issues.append(("E25", "NUMBER_GAPS:" + ",".join(map(str,missing[:30]))))
+    counts = defaultdict(int)
+    for row in findings:
+        counts[row["item_no"]] += 1
+    for k, count in counts.items():
+        if count > 1:
+            issues.append(("E26", "DUPLICATE_ITEM_NO:" + str(k)))
+    return sorted(findings, key=lambda r: (r["item_no"], r["x0"])), issues, {
+        "anchors": len(anchors), "number_candidates": numbered, "grid_candidates": grid_count
+    }
+
+
+def synthetic():
+    """Three virtual test cases: valid table, upper note, left continuation."""
+    texts, lines = [], []
+    # Right table x=100..350; left continuation x=-175..75.
+    def table(bounds, nums, anchor=False):
+        for x in bounds:
+            lines.append(Line(x, 0, x, 24*len(nums)+24))
+        for k in range(len(nums)+2):
+            y = k*24
+            lines.append(Line(bounds[0], y, bounds[-1], y))
+        for i, n in enumerate(nums):
+            y = i*24+8
+            for j, value in enumerate((str(n), "품명"+str(n), str((n%3)+1), "PN-"+str(n), "DWG-"+str(n))):
+                texts.append(Text(value,bounds[j]+5,y,2.5))
+        if anchor:
+            texts.append(Text("부품목록", bounds[0]+25, -15))
+    table([100,130,210,245,300,350],[1,2,3],True)
+    # Left extension starts at number 4, shares lower baseline.
+    table([-175,-145,-65,-30,25,75],[4,5],False)
+    texts.append(Text("수정자 홍길동", 105, 150))
+    texts.append(Text("주기 1. 참고사항", 110, 170))
+    return texts,lines
+
+
+def run_one(name, texts, lines, inspected=0, non_g=0, read_notes=None):
+    rows, issues, diag = find_rows(texts,lines)
+    issue_rows = [{"drawing":name,"code":c,"detail":d} for c,d in issues]
+    for note in read_notes or []:
+        issue_rows.append({"drawing":name,"code":note[:3],"detail":note})
+    for r in rows:
+        r["drawing"] = name
+    return rows, issue_rows, {
+        "drawing":name,"texts_g":len(texts),"segments_g":len(lines),
+        "entities_read":inspected, "entities_other_layer":non_g,
+        "anchors":diag["anchors"],"number_candidates":diag["number_candidates"],
+        "grid_candidates":diag["grid_candidates"],"parts_candidate":len(rows),
+        "issues":len(issue_rows)
+    }
+
+
+def open_autocad():
+    import win32com.client
+    try:
+        return win32com.client.GetActiveObject("AutoCAD.Application")
+    except Exception:
+        return win32com.client.Dispatch("AutoCAD.Application")
+
+
+def run():
+    OUTPUT.mkdir(exist_ok=True)
+    demo = "--demo" in sys.argv
+    docs = sorted(INPUT.rglob("*.dwg"), key=lambda p:str(p).casefold()) if not demo and INPUT.exists() else []
+    if not demo and not docs:
+        print("V0.5.1|DWG0|표0|행0|검토1|E01")
+        print("CAD_INPUT 폴더에 DWG 파일을 넣으세요.")
+        return 2
+    data, issues, diags = [], [], []
+    failed, success, initial = 0, 0, time.time()
+    acad = None
+    if not demo:
+        try:
+            acad = open_autocad()
+        except Exception as exc:
+            print("V0.5.1|DWG0|표0|행0|검토1|E02")
+            print("AutoCAD 연결 실패:",type(exc).__name__)
+            return 3
+    work = [None] if demo else docs
+    for path in work:
+        name = "DEMO.dwg" if demo else path.name
+        doc = None
+        try:
+            if demo:
+                texts, lines = synthetic()
+                raw_count, ignored, extra = len(texts)+len(lines), 0, []
+            else:
+                doc = acad.Documents.Open(str(path.resolve()),True)
+                texts, lines, raw_count, ignored, extra = collect_geometry(doc)
+            rows, errs, diag = run_one(name,texts,lines,raw_count,ignored,extra)
+            data.extend(rows)
+            issues.extend(errs)
+            diags.append(diag)
+            success += 1
+        except Exception as exc:
+            failed += 1
+            issues.append({"drawing":name,"code":"E03","detail":type(exc).__name__+":"+str(exc)[:130]})
+            diags.append({"drawing":name,"texts_g":0,"segments_g":0,"entities_read":0,
+                          "entities_other_layer":0,"anchors":0,"number_candidates":0,
+                          "grid_candidates":0,"parts_candidate":0,"issues":1})
+        finally:
+            if doc is not None:
+                try:
+                    doc.Close(False)
+                except Exception:
+                    issues.append({"drawing":name,"code":"E04","detail":"CLOSE_FAILED"})
+    write_csv(OUTPUT/"PARTS_CANDIDATES.csv",
+              ["drawing","space",*PART_COLUMNS,"x0","x5","y0","y1","status"],data)
+    write_csv(OUTPUT/"VALIDATION.csv",["drawing","code","detail"],issues)
+    write_csv(OUTPUT/"DIAGNOSTICS.csv",
+              ["drawing","texts_g","segments_g","entities_read","entities_other_layer",
+               "anchors","number_candidates","grid_candidates","parts_candidate","issues"],diags)
+    summary = {"version":VERSION,"mode":"DEMO" if demo else "DWG",
+               "drawings":len(work),"read_success":success,"read_failed":failed,
+               "part_candidates":len(data),"issues":len(issues),
+               "seconds":round(time.time()-initial,2),
+               "caution":"Candidates require comparison with actual parts lists; not confirmed BOM."}
+    (OUTPUT/"SUMMARY.json").write_text(json.dumps(summary,indent=2,ensure_ascii=False),encoding="utf-8")
+    # Short feedback line contains no drawing names or part numbers.
+    worst = "E03" if failed else ("E24" if not data else ("E25" if any(i["code"]=="E25" for i in issues) else "E00"))
+    print("V0.5.1|DWG%d|표%d|행%d|검토%d|%s" %
+          (len(work),sum(d["anchors"] for d in diags),len(data),len(issues),worst))
+    return 0 if not failed else 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(run())
+    except Exception:
+        OUTPUT.mkdir(exist_ok=True)
+        (OUTPUT/"FATAL_ERROR.txt").write_text(traceback.format_exc(),encoding="utf-8")
+        print("V0.5.1|DWG0|표0|행0|검토1|E99")
+        sys.exit(99)
