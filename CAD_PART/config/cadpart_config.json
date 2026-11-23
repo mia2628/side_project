@@ -1,0 +1,12 @@
+{
+  "captures_per_dwg": 3,
+  "capture_mode": "model_plus_layouts",
+  "capture_delay_seconds": 1.6,
+  "capture_bbox_normalized": [0.045, 0.075, 0.97, 0.865],
+  "excel_image_width_px": 320,
+  "excel_image_height_px": 205,
+  "recursive_search": true,
+  "close_dwg_after_capture": true,
+  "save_interval_drawings": 25,
+  "show_autocad": true
+}
