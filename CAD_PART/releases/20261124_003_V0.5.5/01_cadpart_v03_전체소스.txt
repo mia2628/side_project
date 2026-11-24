@@ -220,11 +220,11 @@ def drawing_identity(path):
     'part_key' is a candidate only, never a confirmed assembly/part link.
     """
     stem = path.stem.strip()
-    normalized = re.sub(r"\\s+", "", stem).upper()
+    normalized = re.sub(r"\s+", "", stem).upper()
     # Only explicit sheet suffixes are considered. Other conventions remain ungrouped.
-    match = re.fullmatch(r"(.+?)(?:[_ -](?:SHEET|SH|SHT|시트)[_ -]?(\\d{1,3})|\\s*\\((\\d{1,3})\\))", stem, flags=re.IGNORECASE)
+    match = re.fullmatch(r"(.+?)(?:[_ -](?:SHEET|SH|SHT|시트)[_ -]?(\d{1,3})|\s*\((\d{1,3})\))", stem, flags=re.IGNORECASE)
     if match and match.group(1).strip():
-        base = re.sub(r"\\s+", "", match.group(1)).upper()
+        base = re.sub(r"\s+", "", match.group(1)).upper()
         return normalized, base, "SHEET_SUFFIX_CANDIDATE"
     return normalized, normalized, "EXACT_NAME_CANDIDATE"
 
