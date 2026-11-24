@@ -344,7 +344,7 @@ def find_headers(texts, anchors):
 
 
 # Row extraction is a candidate generator, not proof that a cell contains an actual part.
-ITEM_RE = re.compile(r"^\\s*(\\d{1,4})\\s*[.)]?\\s*$")
+ITEM_RE = re.compile(r"^\s*(\d{1,4})\s*[.)]?\s*$")
 MAX_ROW_STEPS = 300
 
 
@@ -486,6 +486,7 @@ def demo():
 
 def main():
     OUTPUT.mkdir(exist_ok=True)
+    start_time=time.monotonic()
     # Unique run output prevents old validation files from being read as a new run.
     run_id=datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     global ACTIVE_OUTPUT
@@ -690,7 +691,7 @@ def main():
     no_anchor_drawings = sum(row["status"]=="NO_ANCHOR" for row in drawing_index)
     group_candidates = len(groups)
     multi_drawing_candidate_groups = sum(len(members)>1 for members in groups.values())
-    summary={"version":VERSION,"run_id":run_id,"source_hash":code_sha,"dwg_files":len(files),"texts":total_text,
+    summary={"version":VERSION,"run_id":run_id,"source_hash":code_sha,"elapsed_seconds":round(time.monotonic()-start_time,2),"dwg_files":len(files),"texts":total_text,
              "drawings_with_anchor":anchor_drawings,"anchor_occurrences":found,
              "read_error_drawings":read_error_drawings,
              "analysis_error_drawings":analysis_error_drawings,
