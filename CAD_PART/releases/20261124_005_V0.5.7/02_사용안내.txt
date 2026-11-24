@@ -1,0 +1,44 @@
+CAD-PART V0.5.7 / 2026-11-24 / 배포 005
+목적: V0.5.6 코드 버그 수정과 오류 원인 분리.
+
+핵심 수정
+1. complete 변수가 정의되기 전에 사용된 오류 제거.
+2. AutoCAD 도면 읽기와 Python 기준문자/헤더 분석 오류 구분.
+3. 문자 수와 기준점 수가 분석 단계 오류 때문에 0으로 덮이지 않도록 개선.
+4. HEADER_RESULTS.csv 및 HEADER_CANDIDATES.csv 생성 유지.
+5. 한 품목이 여러 DWG를 가질 수 있으므로 DWG 개수와 고유 품목 수는 구분.
+6. 임의의 최상위 조립품 지정 없음.
+
+실행 환경
+Windows, AutoCAD 2019, 사내 승인된 Python + pywin32.
+CAD_PART\cadpart_v03.py
+CAD_PART\CAD_INPUT\ (2~3 DWG부터 시험)
+CAD_PART\CAD_RESULT\ (결과 자동 생성)
+
+명령 한 줄: python cadpart_v03.py
+별도 가상 테스트: python cadpart_v03.py --demo
+
+출력
+SUMMARY.json / HEADER_RESULTS.csv / HEADER_CANDIDATES.csv
+ANCHOR_RESULTS.csv / DRAWING_INDEX.csv / DIAGNOSTICS.csv
+VALIDATION.csv / STAGES.csv
+
+피드백 마지막 한 줄:
+V0.5.7|DWG3|읽음3|기준3|헤더2|읽기오류0|분석오류0|E40
+(예시 숫자)
+
+E00: 대상 도면 전부 기준점 및 5개 헤더 후보 발견
+E21: 적어도 한 도면에서 기준점 없음
+E40: 기준점은 있으나 헤더 5개 검출 불완전
+E41: Python 헤더/기준문자 분석 중 예외
+E03: AutoCAD 객체 읽기 단계 실패
+E31: COM 호출 거부가 제한 시간 내 회복되지 않음
+E04: 도면 닫기 실패 (VALIDATION.csv)
+E99: 치명적 오류
+
+중요
+이번 버전은 코드 오류 수정본이며 실제 DWG 환경에서의 정확도는 검증되지 않았습니다.
+'헤더'는 5개 열 제목이 인식된 DWG 수이지 부품 추출 수가 아닙니다.
+AutoCAD를 다른 추출 작업에 사용 중이면 실행을 피하고 팝업과 명령을 종료한 뒤 시험하세요.
+사내 도면, 품번, 경로, 상세 오류 로그는 공개 GitHub에 올리지 않습니다.
+승인된 코드 반입·실행 절차를 따릅니다.
