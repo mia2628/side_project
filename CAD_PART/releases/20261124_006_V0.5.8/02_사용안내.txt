@@ -1,0 +1,28 @@
+CAD-PART V0.5.8 / 2026-11-24 / 배포 006
+
+실제 피드백: V0.5.7 / 20 DWG / 읽음0 / OPEN 단계 E03 / AttributeError
+이번 수정 목적: 원인 식별. V0.5.7에서 누락된 세부 오류를 나눕니다.
+
+E33: AutoCAD Documents 객체에서 Open 속성을 찾지 못함 (OPEN_METHOD)
+E34: Open 메서드를 얻은 뒤 호출할 때 AttributeError (OPEN_CALL)
+E03: 기타 AutoCAD 접근/도면 분석 오류
+E31: COM 요청 재시도 시간초과
+E41: 기준문자/열 제목 분석 중 Python 예외
+E40: 기준문자 존재하지만 헤더 5개 인식 불완전
+
+이번 버전은 통신/속성 접근 진단을 추가한 것이며 Open 오류가 반드시 해결되는 것은 아닙니다.
+파이썬에서 찾지 못한 속성 이름이 존재하면 VALIDATION.csv의 missing_attribute 열에 기록합니다.
+사내 도면경로나 객체정보를 GitHub에 업로드하지 않습니다.
+
+실행:
+  사내 승인 환경에서 이전 cadpart_v03.py를 백업 후 새 소스로 교체.
+  AutoCAD 2019에서 다른 작업 종료 후 2~3개 DWG만 시험.
+  입력 폴더는 CAD_INPUT, 출력 폴더는 CAD_RESULT.
+  python cadpart_v03.py
+
+결과: STAGES.csv / VALIDATION.csv / HEADER_RESULTS.csv / DIAGNOSTICS.csv / SUMMARY.json
+한 줄 피드백: V0.5.8|DWG3|읽음0|기준0|헤더0|읽기오류3|분석오류0|E33
+(예시)
+
+E33 또는 E34라면 VALIDATION.csv 한 행에서 stage와 missing_attribute만 알려주면 됩니다.
+실도면 실행 미검증. 소스 반입과 실행은 회사 승인 절차를 따릅니다.
