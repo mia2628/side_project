@@ -1,0 +1,56 @@
+CAD-PART V0.5.6 | 2026-11-24 | 배포번호 004
+
+목적: 이전 V0.5.5의 '부품목록' 기준문자 탐지 성공을 기반으로,
+그 위의 표 열 제목 5개를 독립적으로 인식합니다.
+이번에는 실제 구성품 행이나 BOM 상하위 계층을 추출하지 않습니다.
+
+대상 기준:
+1. 부품목록 (단일 TEXT 또는 부/품/목/록처럼 개별 TEXT도 가능)
+2. 품번
+3. 품명
+4. 수량
+5. 부품번호
+6. 도면번호
+
+다섯 열 제목은 붙어 있거나 품/번처럼 나뉜 경우 모두 후보 생성.
+공간(모델/배치)이 같은지, '부품목록' 위에 있는지, 가로 배열 및 Y 높이가
+비슷한지 확인합니다. 순서가 올바른 다섯 열을 찾아야 HEADER_COMPLETE.
+기준점 1개에 대해 헤더 5개를 찾지 못하면 PARTIAL/NOT_FOUND.
+여러 도면이 같은 품목일 수 있으므로 DWG 파일 수와 품목 수를 혼동하지 않습니다.
+
+준비: Windows AutoCAD 2019, 회사에서 승인한 Python/pywin32.
+D:\CAD_PART\cadpart_v03.py
+D:\CAD_PART\CAD_INPUT\ (DWG 시험 도면 2~3개)
+D:\CAD_PART\CAD_RESULT\ (출력 폴더 자동 생성)
+
+실행:
+python cadpart_v03.py
+
+출력:
+CAD_RESULT/HEADER_RESULTS.csv - 기준점별 다섯 제목 검출 상태/좌표
+CAD_RESULT/HEADER_CANDIDATES.csv - 발견된 열 제목 후보
+CAD_RESULT/ANCHOR_RESULTS.csv - 부품목록 기준점
+CAD_RESULT/DRAWING_INDEX.csv - 도면별 상태 및 임시 품목 그룹
+CAD_RESULT/STAGES.csv - COM 오류 단계
+CAD_RESULT/VALIDATION.csv - E40 등 오류
+CAD_RESULT/SUMMARY.json
+
+모바일에 마지막 줄만 전달:
+V0.5.6|DWG20|기준20|헤더15|부분5|읽기오류0|E40
+(숫자는 예시)
+
+E00: 발견된 기준점에 대해 모두 헤더 5개 검출
+E40: 부품목록은 있지만 헤더 전체를 못 찾은 DWG가 있음
+E03: DWG 읽기 실패
+E31: COM 통신 시간초과
+E21: 기준문자 못 찾음
+E99: 치명적 예외
+
+현 단계 주의:
+- G 레이어만 탐색하지 않고 다른 레이어의 문자도 후보 포함합니다.
+- 모델/배치 분리, 일반 블록 안의 문자 순회는 기존 구조를 유지합니다.
+- XREF/Proxy 지원은 미구현이며 도면 양식 차이로 일부 헤더를 놓칠 수 있습니다.
+- HEADER_COMPLETE는 위치 기반 후보 일치이며 실제 부품표 정확도 검증 완료를 의미하지 않습니다.
+- AutoCAD 2019의 실도면 테스트는 아직 수행하지 못했습니다.
+- 사내 기밀 원본/로그/품번을 GitHub에 등록하지 마세요.
+- 반드시 회사에서 승인한 소스 반입 및 실행 절차를 따르세요.
