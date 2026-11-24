@@ -1,0 +1,555 @@
+# -*- coding: utf-8 -*-
+"""CAD-PART V0.5.8 — '부품목록' 기준 문자 탐색 전용 진단판.
+AutoCAD 2019 + pywin32 / Windows / 오프라인.
+실행: python cadpart_v03.py
+도면을 수정하거나 저장하지 않으며, 실제 부품 추출은 하지 않습니다.
+"""
+from __future__ import annotations
+import csv
+import json
+import math
+import re
+import sys
+import time
+import traceback
+from collections import defaultdict
+from pathlib import Path
+
+VERSION = "0.5.8"
+ROOT = Path(__file__).resolve().parent
+INPUT = ROOT / "CAD_INPUT"
+OUTPUT = ROOT / "CAD_RESULT"
+TARGET = "부품목록"
+BUSY = {-2147418111, -2147417846}
+MAX_OBJECTS = 300000
+MAX_BLOCK_DEPTH = 5
+
+def call(fn, stage, seconds=20):
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            return fn()
+        except Exception as exc:
+            hr = getattr(exc, "hresult", None)
+            if hr is None and getattr(exc, "args", None):
+                hr = exc.args[0]
+            if hr not in BUSY:
+                raise
+            if time.monotonic() >= deadline:
+                raise RuntimeError("E31_COM_BUSY:" + stage) from exc
+            try:
+                import pythoncom
+                pythoncom.PumpWaitingMessages()
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+def prop(obj, key, default=None):
+    try:
+        return call(lambda: getattr(obj, key), "get."+key)
+    except RuntimeError:
+        raise
+    except Exception:
+        return default
+
+def items(coll):
+    total = int(call(lambda: coll.Count, "Count"))
+    for i in range(total):
+        yield call(lambda j=i: coll.Item(j), "Item")
+
+def norm(s):
+    return re.sub(r"[\s\\{};._\-:()\[\]0-9]+", "", str(s or "")).replace("　", "")
+
+def token(s):
+    """Find target-bearing fragments while avoiding large unrelated strings."""
+    t = norm(s)
+    if TARGET in t:
+        return TARGET
+    if len(t) <= 4 and t and (TARGET.startswith(t) or t in TARGET):
+        return t
+    return ""
+
+def transform(a, pt):
+    x,y = float(pt[0]),float(pt[1])
+    return (a[0]*x+a[1]*y+a[4], a[2]*x+a[3]*y+a[5])
+
+IDENTITY = (1.,0.,0.,1.,0.,0.)
+
+def combine(a,b):
+    return (
+      a[0]*b[0]+a[1]*b[2], a[0]*b[1]+a[1]*b[3],
+      a[2]*b[0]+a[3]*b[2], a[2]*b[1]+a[3]*b[3],
+      a[0]*b[4]+a[1]*b[5]+a[4],
+      a[2]*b[4]+a[3]*b[5]+a[5])
+
+def block_matrix(obj):
+    p = prop(obj,"InsertionPoint",(0,0,0))
+    sx = float(prop(obj,"XScaleFactor",1) or 1)
+    sy = float(prop(obj,"YScaleFactor",1) or 1)
+    angle = float(prop(obj,"Rotation",0) or 0)
+    c,s=math.cos(angle),math.sin(angle)
+    return (sx*c,-sy*s,sx*s,sy*c,float(p[0]),float(p[1]))
+
+def collect(doc):
+    texts=[]
+    issues=[]
+    counts={"entities":0,"texts":0,"g_texts":0,"blocks":0,"skipped":0}
+    blocks=call(lambda: doc.Blocks,"Blocks")
+    def add_text(obj,space,mat,tag="text"):
+        val=str(prop(obj,"TextString","") or "").replace("\\P"," ")
+        p=prop(obj,"InsertionPoint",None)
+        if not p or not val.strip():
+            return
+        x,y=transform(mat,p)
+        h=float(prop(obj,"Height",2.5) or 2.5)
+        layer=str(prop(obj,"Layer","") or "")
+        texts.append({"v":val,"x":x,"y":y,"h":max(.1,abs(h)),"layer":layer,"space":space,"tag":tag})
+        counts["texts"]+=1
+        if layer.casefold()=="g":
+            counts["g_texts"]+=1
+    def scan(objects,space,mat,depth,stack):
+        for obj in items(objects):
+            counts["entities"]+=1
+            if counts["entities"]>MAX_OBJECTS:
+                raise RuntimeError("E11_ENTITY_LIMIT")
+            kind=str(prop(obj,"ObjectName",""))
+            try:
+                if kind in ("AcDbText","AcDbMText","AcDbAttribute","AcDbAttributeDefinition"):
+                    add_text(obj,space,mat)
+                elif kind in ("AcDbBlockReference","AcDbMInsertBlock"):
+                    counts["blocks"]+=1
+                    bname=str(prop(obj,"Name","") or "")
+                    # AttributeReferences are already positioned in the drawing.
+                    if bool(prop(obj,"HasAttributes",False)):
+                        try:
+                            attrs=call(lambda: obj.GetAttributes(),"GetAttributes")
+                            for at in attrs:
+                                add_text(at,space,mat,"attribute")
+                        except Exception:
+                            counts["skipped"]+=1
+                    if depth>=MAX_BLOCK_DEPTH or bname.casefold() in stack:
+                        counts["skipped"]+=1
+                        continue
+                    # XREF is not traversed by this diagnostic (reported separately).
+                    try:
+                        definition=call(lambda name=bname:blocks.Item(name),"Blocks.Item")
+                        if bool(prop(definition,"IsXRef",False)):
+                            counts["skipped"]+=1
+                            continue
+                        scan(definition,space,combine(mat,block_matrix(obj)),depth+1,stack|{bname.casefold()})
+                    except RuntimeError:
+                        raise
+                    except Exception:
+                        counts["skipped"]+=1
+            except RuntimeError:
+                raise
+            except Exception:
+                counts["skipped"]+=1
+    scan(call(lambda:doc.ModelSpace,"ModelSpace"),"MODEL",IDENTITY,0,set())
+    try:
+        layouts=call(lambda:doc.Layouts,"Layouts")
+        for layout in items(layouts):
+            name=str(prop(layout,"Name",""))
+            if name.lower()=="model":
+                continue
+            try:
+                scan(call(lambda l=layout:l.Block,"Layout.Block"),"LAYOUT:"+name,IDENTITY,0,set())
+            except RuntimeError:
+                raise
+            except Exception:
+                counts["skipped"]+=1
+    except RuntimeError:
+        raise
+    except Exception:
+        issues.append("E14_LAYOUT_UNREAD")
+    return texts,counts,issues
+
+def find_target(texts):
+    """Reconstruct 1~4 adjacent text objects left->right or top->bottom."""
+    results=[]
+    used=set()
+    byspace=defaultdict(list)
+    for i,t in enumerate(texts):
+        v=token(t["v"])
+        if v:
+            byspace[t["space"]].append((i,t,v))
+        if TARGET in norm(t["v"]):
+            key=(i,)
+            used.add(key)
+            results.append({"space":t["space"],"layer":t["layer"],"x":round(t["x"],2),"y":round(t["y"],2),
+                            "mode":"WHOLE_TEXT","objects":1,"text":"부품목록"})
+    for space,group in byspace.items():
+        for i,start,fragment in group:
+            if not TARGET.startswith(fragment) or fragment==TARGET:
+                continue
+            for direction in ("H","V"):
+                def visit(phrase,chain,current):
+                    if phrase==TARGET:
+                        ids=tuple(e[0] for e in chain)
+                        if ids not in used:
+                            used.add(ids)
+                            results.append({"space":space,"layer":start["layer"],"x":round(start["x"],2),
+                                            "y":round(start["y"],2),"mode":"JOIN_"+direction,
+                                            "objects":len(chain),"text":"부품목록"})
+                        return
+                    if len(chain)>=4:
+                        return
+                    options=[]
+                    for j,t,v in group:
+                        if j in {entry[0] for entry in chain} or not TARGET.startswith(phrase+v):
+                            continue
+                        dx=t["x"]-current["x"]
+                        dy=t["y"]-current["y"]
+                        h=max(start["h"],current["h"],t["h"],.1)
+                        if direction=="H":
+                            valid=(dx>0.05*h and dx<12*h and abs(dy)<1.25*h)
+                            dist=dx/h+2*abs(dy)/h
+                        else:
+                            valid=(dy<-.05*h and -dy<12*h and abs(dx)<1.25*h)
+                            dist=(-dy)/h+2*abs(dx)/h
+                        if valid:
+                            options.append((dist,j,t,v))
+                    for _,j,t,v in sorted(options,key=lambda q:q[0])[:8]:
+                        visit(phrase+v,chain+[(j,t,v)],t)
+                visit(fragment,[(i,start,fragment)],start)
+    # Prefer candidates near lower-right of their own text space, but never discard others.
+    return results
+
+def drawing_identity(path):
+    """Keep drawing identity independent from part identity.
+    'part_key' is a candidate only, never a confirmed assembly/part link.
+    """
+    stem = path.stem.strip()
+    normalized = re.sub(r"\s+", "", stem).upper()
+    # Only explicit sheet suffixes are considered. Other conventions remain ungrouped.
+    match = re.fullmatch(r"(.+?)(?:[_ -](?:SHEET|SH|SHT|시트)[_ -]?(\d{1,3})|\s*\((\d{1,3})\))", stem, flags=re.IGNORECASE)
+    if match and match.group(1).strip():
+        base = re.sub(r"\s+", "", match.group(1)).upper()
+        return normalized, base, "SHEET_SUFFIX_CANDIDATE"
+    return normalized, normalized, "EXACT_NAME_CANDIDATE"
+
+
+
+HEADERS = ("품번","품명","수량","부품번호","도면번호")
+
+def label_candidates(texts, anchor, word):
+    """Join nearby separate text entities along a header baseline."""
+    nearby = []
+    for index,t in enumerate(texts):
+        if t["space"] != anchor["space"]:
+            continue
+        h = max(0.1, float(t["h"]), float(anchor.get("h",2.5)))
+        if not (anchor["y"] + .1*h < t["y"] <= anchor["y"] + 32*h):
+            continue
+        if not (anchor["x"] - 220*h < t["x"] < anchor["x"] + 220*h):
+            continue
+        frag = norm(t["v"])
+        if frag and frag in word and len(frag) <= len(word):
+            nearby.append((index,t,frag))
+    results = []
+    used = set()
+    def emit(chain):
+        ids = tuple(p[0] for p in chain)
+        if ids in used:
+            return
+        used.add(ids)
+        xs = [p[1]["x"] for p in chain]
+        ys = [p[1]["y"] for p in chain]
+        hs = [p[1]["h"] for p in chain]
+        results.append({"label":word,"x":min(xs),"x_end":max(xs),
+                        "y":sum(ys)/len(ys),"h":max(hs),
+                        "pieces":len(chain),"ids":ids})
+    def search(phrase,chain,last):
+        if phrase == word:
+            emit(chain)
+            return
+        if len(chain)>=len(word):
+            return
+        options=[]
+        for idx,t,frag in nearby:
+            if idx in {p[0] for p in chain} or not word.startswith(phrase+frag):
+                continue
+            dx=t["x"]-last["x"]
+            dy=abs(t["y"]-last["y"])
+            h=max(.1,last["h"],t["h"])
+            if .05*h<dx<11*h and dy<1.4*h:
+                options.append((dx/h+2*dy/h,idx,t,frag))
+        for _,idx,t,frag in sorted(options,key=lambda q:q[0])[:8]:
+            search(phrase+frag,chain+[(idx,t,frag)],t)
+    for idx,t,frag in nearby:
+        if word.startswith(frag):
+            search(frag,[(idx,t,frag)],t)
+    results.sort(key=lambda c:(c["pieces"],c["y"]-anchor["y"]))
+    return results[:25]
+
+
+def find_headers(texts, anchors):
+    """One row per anchor, five distinct headings ordered left-to-right."""
+    output,evidence=[],[]
+    for anchor_index,anchor in enumerate(anchors,1):
+        ah=max((t["h"] for t in texts if t["space"]==anchor["space"]
+                and abs(t["x"]-anchor["x"])<=.5
+                and abs(t["y"]-anchor["y"])<=.5), default=2.5)
+        base=dict(anchor)
+        base["h"]=ah
+        opts={w:label_candidates(texts,base,w) for w in HEADERS}
+        for word in HEADERS:
+            for opt in opts[word]:
+                evidence.append({"anchor_index":anchor_index,"label":word,
+                                 "x":round(opt["x"],2),"y":round(opt["y"],2),
+                                 "pieces":opt["pieces"]})
+        best=None
+        best_score=float("inf")
+        for first in opts[HEADERS[0]]:
+            baseline=first["y"]
+            selected=[first]
+            total=0.
+            for word in HEADERS[1:]:
+                previous=selected[-1]
+                valid=[]
+                for opt in opts[word]:
+                    h=max(base["h"],opt["h"],first["h"])
+                    if (opt["x"]>previous["x_end"]+.05*h and
+                        abs(opt["y"]-baseline)<2.0*h and
+                        not any(set(opt["ids"]) & set(p["ids"]) for p in selected)):
+                        valid.append(opt)
+                if not valid:
+                    break
+                chosen=min(valid,key=lambda opt:
+                           abs(opt["y"]-baseline)/max(opt["h"],.1)+.15*opt["pieces"])
+                selected.append(chosen)
+                total+=abs(chosen["y"]-baseline)/max(chosen["h"],.1)
+            if len(selected)==5:
+                span=selected[-1]["x"]-selected[0]["x"]
+                score=total+.1*sum(o["pieces"] for o in selected)
+                score+=.012*abs(baseline-base["y"])/max(base["h"],.1)
+                if span>0 and score<best_score:
+                    best=selected
+                    best_score=score
+        count=sum(bool(opts[w]) for w in HEADERS)
+        rec={"anchor_index":anchor_index,"space":anchor["space"],
+             "anchor_x":anchor["x"],"anchor_y":anchor["y"],
+             "available_labels":count,
+             "status":"COMPLETE" if best is not None else
+                      ("PARTIAL" if count else "NOT_FOUND")}
+        if best:
+            for word,c in zip(HEADERS,best):
+                rec[word+"_x"]=round(c["x"],2)
+                rec[word+"_y"]=round(c["y"],2)
+                rec[word+"_pieces"]=c["pieces"]
+        output.append(rec)
+    return output,evidence
+
+def csv_write(path,header,rows):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    with path.open("w",newline="",encoding="utf-8-sig") as fh:
+        w=csv.DictWriter(fh,fieldnames=header,extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+def demo():
+    texts=[
+      {"v":c,"x":100+i*8,"y":25,"h":3,"layer":"G","space":"MODEL","tag":"text"}
+      for i,c in enumerate(TARGET)
+    ]
+    texts += [
+      {"v":c,"x":200,"y":70-i*8,"h":3,"layer":"0","space":"MODEL","tag":"text"}
+      for i,c in enumerate(TARGET)
+    ]
+    texts.append({"v":"부 품 목 록","x":40,"y":90,"h":3,"layer":"G","space":"MODEL","tag":"text"})
+    return texts,{"entities":len(texts),"texts":len(texts),"g_texts":5,"blocks":0,"skipped":0},[]
+
+def main():
+    OUTPUT.mkdir(exist_ok=True)
+    is_demo="--demo" in sys.argv
+    paths=sorted(INPUT.rglob("*.dwg"),key=lambda p:str(p).casefold()) if INPUT.is_dir() and not is_demo else []
+    if not paths and not is_demo:
+        print("V0.5.8|DWG0|문자0|찾음0|실패1|E01")
+        return 2
+    if not is_demo:
+        try:
+            import pythoncom, win32com.client
+            pythoncom.CoInitialize()
+            try:
+                acad=call(lambda:win32com.client.GetActiveObject("AutoCAD.Application"),"GetActiveObject")
+            except Exception:
+                acad=call(lambda:win32com.client.Dispatch("AutoCAD.Application"),"Dispatch")
+        except Exception as exc:
+            print("V0.5.8|DWG0|문자0|찾음0|실패1|E02")
+            (OUTPUT/"ERROR.txt").write_text(str(exc),encoding="utf-8")
+            return 3
+    details=[]; diagnostics=[]; errors=[]
+    header_rows=[]; header_evidence=[]
+    scan_success_drawings = 0
+    scanned_texts = 0
+    drawing_index=[]
+    stages=[]
+    def stage_report(index, where, code="OK"):
+        stages.append({"index":index,"stage":where,"code":code})
+
+    files=[None] if is_demo else paths
+    for index, path in enumerate(files, 1):
+        name="DEMO.dwg" if path is None else path.name
+        stage_report(index,"START")
+        doc=None
+        if is_demo:
+            drawing_key, part_key, match_rule = "DEMO", "DEMO", "EXACT_NAME_CANDIDATE"
+            relative_name = name
+        else:
+            drawing_key, part_key, match_rule = drawing_identity(path)
+            relative_name = str(path.relative_to(INPUT))
+        index_row = {"drawing_index":index, "file":relative_name,
+                     "drawing_key":drawing_key, "part_key_candidate":part_key,
+                     "match_rule":match_rule, "anchor_count":0,"header_complete_count":0,
+                     "status":"NOT_CHECKED"}
+        drawing_index.append(index_row)
+        stage = "START"
+        counts = None
+        matches = []
+        try:
+            if is_demo:
+                stage = "DEMO"
+                texts,counts,issues=demo()
+            else:
+                stage = "DOCUMENTS"
+                stage_report(index,"DOCUMENTS")
+                docs=call(lambda:acad.Documents,"Documents")
+                stage = "OPEN_METHOD"
+                stage_report(index,"OPEN_METHOD")
+                open_method=call(lambda:docs.Open,"Documents.Open_method")
+                stage = "OPEN_CALL"
+                stage_report(index,"OPEN_CALL")
+                doc=call(lambda:open_method(str(path.resolve()),True),"Documents.Open_call")
+                time.sleep(1.5)
+                stage = "SCAN"
+                stage_report(index,"SCAN")
+                texts,counts,issues=collect(doc)
+            scan_success_drawings += 1
+            scanned_texts += counts["texts"]
+            stage = "MATCH"
+            stage_report(index,"MATCH")
+            matches=find_target(texts)
+            for m in matches:
+                details.append({"drawing":name,"drawing_index":index,
+                                "part_key_candidate":part_key,**m})
+            index_row["anchor_count"]=len(matches)
+            stage = "HEADERS"
+            stage_report(index,"HEADERS")
+            hrows,hev=find_headers(texts,matches)
+            complete=sum(hr["status"]=="COMPLETE" for hr in hrows)
+            index_row["header_complete_count"]=complete
+            index_row["status"]=("HEADER_COMPLETE" if complete else
+                                 ("ANCHOR_ONLY" if matches else "NO_ANCHOR"))
+            for hr in hrows:
+                header_rows.append({"drawing_index":index,"drawing":name,**hr})
+            for ev in hev:
+                header_evidence.append({"drawing_index":index,"drawing":name,**ev})
+            code=("E00" if complete else ("E40" if matches else
+                  ("E21" if counts["texts"] else "E20")))
+            if matches and not complete:
+                errors.append({"drawing":name,"code":"E40","stage":"HEADERS","error_type":""})
+            stage_report(index,"HEADERS",code)
+            diagnostics.append({"drawing":name,**counts,"found":len(matches),"code":code})
+            for issue in issues:
+                errors.append({"drawing":name,"code":issue})
+        except Exception as exc:
+            code=("E31" if "E31_COM_BUSY" in str(exc)
+                  else "E33" if stage=="OPEN_METHOD" and isinstance(exc,AttributeError)
+                  else "E34" if stage=="OPEN_CALL" and isinstance(exc,AttributeError)
+                  else "E41" if stage in ("MATCH","HEADERS")
+                  else "E03")
+            index_row["status"]="ANALYSIS_ERROR" if code=="E41" else "READ_ERROR"
+            index_row["header_complete_count"]=0
+            stage_report(index,stage,code)
+            raw=counts or {"entities":0,"texts":0,"g_texts":0,
+                           "blocks":0,"skipped":0}
+            diagnostics.append({"drawing":name,**raw,"found":len(matches),"code":code})
+            # Only the missing Python attribute name is exported: never DWG paths.
+            missing_attribute=getattr(exc,"name",None)
+            missing_attribute=(str(missing_attribute)[:40]
+                               if missing_attribute else "")
+            errors.append({"drawing":name,"code":code,"stage":stage,
+                           "error_type":type(exc).__name__,
+                           "missing_attribute":missing_attribute})
+        finally:
+            if doc is not None:
+                try:
+                    stage_report(index,"CLOSE")
+                    call(lambda:doc.Close(False),"Documents.Close")
+                    time.sleep(.5)
+                except Exception:
+                    stage_report(index,"CLOSE","E04")
+                    errors.append({"drawing":name,"code":"E04"})
+    # Filename-based grouping is a hint, not proof of a shared part.
+    groups = defaultdict(list)
+    for row in drawing_index:
+        groups[row["part_key_candidate"]].append(row)
+    for row in drawing_index:
+        peers = groups[row["part_key_candidate"]]
+        row["candidate_group_size"] = len(peers)
+        row["group_status"] = ("REVIEW_REQUIRED" if len(peers)>1 else
+                               "SINGLE_DOCUMENT_CANDIDATE")
+    csv_write(OUTPUT/"DRAWING_INDEX.csv",
+              ["drawing_index","file","drawing_key","part_key_candidate",
+               "match_rule","candidate_group_size","group_status",
+               "anchor_count","header_complete_count","status"],drawing_index)
+    csv_write(OUTPUT/"HEADER_RESULTS.csv",
+              ["drawing_index","drawing","anchor_index","space","anchor_x","anchor_y",
+               "available_labels","status"]+
+              [x for w in HEADERS for x in (w+"_x",w+"_y",w+"_pieces")],header_rows)
+    csv_write(OUTPUT/"HEADER_CANDIDATES.csv",
+              ["drawing_index","drawing","anchor_index","label","x","y","pieces"],
+              header_evidence)
+    csv_write(OUTPUT/"ANCHOR_RESULTS.csv",
+              ["drawing","drawing_index","part_key_candidate",
+               "space","layer","x","y","mode","objects","text"],details)
+    csv_write(OUTPUT/"DIAGNOSTICS.csv",
+              ["drawing","entities","texts","g_texts","blocks","skipped","found","code"],diagnostics)
+    csv_write(OUTPUT/"VALIDATION.csv",["drawing","code","stage","error_type","missing_attribute"],errors)
+    csv_write(OUTPUT/"STAGES.csv",["index","stage","code"],stages)
+    total_text=scanned_texts
+    found=len(details)
+    fail=sum(x["code"]!="E00" for x in diagnostics)
+    success_drawings=sum(x["found"]>0 for x in diagnostics)
+    anchor_drawings = sum(row["anchor_count"] > 0 for row in drawing_index)
+    read_error_drawings = sum(row["status"]=="READ_ERROR" for row in drawing_index)
+    analysis_error_drawings = sum(row["status"]=="ANALYSIS_ERROR" for row in drawing_index)
+    complete_header_drawings=sum(row["header_complete_count"]>0 for row in drawing_index)
+    complete_header_sets=sum(row["status"]=="COMPLETE" for row in header_rows)
+    no_anchor_drawings = sum(row["status"]=="NO_ANCHOR" for row in drawing_index)
+    group_candidates = len(groups)
+    multi_drawing_candidate_groups = sum(len(members)>1 for members in groups.values())
+    summary={"version":VERSION,"dwg_files":len(files),"texts":total_text,
+             "drawings_with_anchor":anchor_drawings,"anchor_occurrences":found,
+             "read_error_drawings":read_error_drawings,
+             "analysis_error_drawings":analysis_error_drawings,
+             "scan_success_drawings":scan_success_drawings,
+             "complete_header_drawings":complete_header_drawings,
+             "complete_header_sets":complete_header_sets,
+             "no_anchor_drawings":no_anchor_drawings,
+             "candidate_part_groups":group_candidates,
+             "multi_drawing_candidate_groups":multi_drawing_candidate_groups,
+             "caution":"File-to-part grouping is provisional; different drawings may represent one part, and distinct parts may have similar names."}
+    (OUTPUT/"SUMMARY.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+    code="E03" if any(x["code"] in ("E03","E31") for x in diagnostics) else ("E21" if not found else "E00")
+    code=("E31" if any(x["code"]=="E31" for x in diagnostics)
+          else "E33" if any(x["code"]=="E33" for x in diagnostics)
+          else "E34" if any(x["code"]=="E34" for x in diagnostics)
+          else "E03" if read_error_drawings
+          else "E41" if analysis_error_drawings
+          else "E40" if complete_header_drawings<anchor_drawings
+          else "E21" if anchor_drawings<len(files)
+          else "E00")
+    print("V0.5.8|DWG%d|읽음%d|기준%d|헤더%d|읽기오류%d|분석오류%d|%s" %
+          (len(files),scan_success_drawings,anchor_drawings,complete_header_drawings,
+           read_error_drawings,analysis_error_drawings,code))
+    return 0
+
+if __name__=="__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        OUTPUT.mkdir(exist_ok=True)
+        (OUTPUT/"FATAL_ERROR.txt").write_text(traceback.format_exc(),encoding="utf-8")
+        print("V0.5.8|DWG0|문자0|찾음0|실패1|E99")
+        sys.exit(99)
