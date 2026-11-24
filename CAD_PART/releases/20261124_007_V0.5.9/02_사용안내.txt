@@ -1,0 +1,46 @@
+CAD-PART V0.5.9 | 2026-11-24 | 배포 007
+
+V0.5.8에는 OPEN 단계가 없고 OPEN_METHOD / OPEN_CALL로 분리되어 있습니다.
+그런데 E03/OPEN/AttributeError가 보였으므로 실행 파일과 결과 파일이 일치하는지 확인해야 합니다.
+
+V0.5.9 핵심
+1. 실제 실행한 Python 파일 내용에서 VERSION 및 OPEN_METHOD/OPEN_CALL 표식을 확인합니다.
+2. 실행 시 RUN 식별번호와 실행 소스 HASH를 출력합니다.
+3. 매 실행마다 CAD_RESULT/RUNS/실행번호/ 폴더에 새 보고서를 생성합니다.
+4. 예전 VALIDATION.csv를 최신 결과로 착각하지 않도록 합니다.
+5. OPEN_METHOD/OPEN_CALL/SCAN 등 실패 단계를 별도로 기록합니다.
+
+기존 파일명 유지: cadpart_v03.py
+사내 승인된 Python 환경, AutoCAD 2019, pywin32 필요.
+CAD_INPUT 폴더에 우선 시험 도면 2~3개만 넣으세요.
+AutoCAD 2019에서 다른 명령/팝업을 모두 종료하세요.
+
+실행: python cadpart_v03.py
+
+콘솔 첫 줄 예시:
+V0.5.9|RUN=20261124_...|HASH=123456789abc
+마지막 줄 예시:
+V0.5.9|DWG3|읽음3|기준3|헤더2|읽기오류0|분석오류0|E40
+
+새로운 보고서 위치:
+CAD_RESULT/RUNS/실행번호/RUN_ID.txt
+CAD_RESULT/RUNS/실행번호/STAGES.csv
+CAD_RESULT/RUNS/실행번호/VALIDATION.csv
+CAD_RESULT/RUNS/실행번호/HEADER_RESULTS.csv
+CAD_RESULT/RUNS/실행번호/SUMMARY.json
+
+E35: 실행 소스가 예상한 표식을 포함하지 않음
+E33: OPEN_METHOD 단계에서 AttributeError
+E34: OPEN_CALL 단계에서 AttributeError
+E03: 일반 DWG 접근 오류
+E31: AutoCAD COM 호출 지속 거부
+E41: Python 분석 단계 예외
+E40: 부품목록은 있으나 헤더 탐색 불완전
+
+모바일 피드백: 마지막 줄만 전송.
+만약 E03이면 가장 최신 RUNS 폴더의 VALIDATION.csv에서 stage,error_type
+두 값만 추가. 도면명, 경로 및 품번을 전송하지 마세요.
+
+참고: V0.5.9는 실행/진단 신뢰성 보강판이며
+실제 AutoCAD 2019에서 성공 검증된 것은 아닙니다.
+사내 승인된 코드 반입·실행 절차를 준수하세요.
