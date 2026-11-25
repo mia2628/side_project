@@ -931,8 +931,24 @@ def main():
                 # A continuation may itself contain a merged-name row; apply the
                 # same expansion using a shifted header geometry.
                 expanded_left=[]
-                for prow in left:
-                    expanded_left.append(prow)
+                # The left tables use a translated copy of the verified
+                # reference geometry; the verified header detector stays fixed.
+                for tid in sorted(set(row["table_id"] for row in left)):
+                    group=[row for row in left if row["table_id"]==tid]
+                    evidence=next((e for e in found_tables
+                                   if e["table_id"]==tid and
+                                   e["decision"]=="ACCEPTED"),None)
+                    if evidence is None:
+                        expanded_left.extend(group)
+                        continue
+                    shifted=dict(hrow)
+                    dx=float(evidence["left_x"])-float(hrow["품번_x"])
+                    for w in HEADERS:
+                        shifted[w+"_x"]=float(hrow[w+"_x"])+dx
+                    more,more_issues=expand_merged_part_rows(
+                        texts,shifted,group,table_id=tid)
+                    expanded_left.extend(more)
+                    split_alerts.extend(more_issues)
                 merged=expanded+expanded_left
                 found_for_drawing+=len(merged)
                 if merged:
