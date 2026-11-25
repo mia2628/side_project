@@ -787,7 +787,11 @@ def recover_merged_lower_rows(texts,header,source_rows,table_id):
                 continue
             # A repeated split cell may have been retained in the original
             # row as a joined string; do not create a false additional part.
-            if any(key in old for old in represented if len(key)>=4):
+            raw_existing=[str(q["part_number"]) for q in source_rows
+                          if int(q["item_no"])==number and q.get("part_number")]
+            if any((" " in value or "\\n" in value) and
+                   key in _part_norm(value) and len(key)>=4
+                   for value in raw_existing):
                 audit.append((table_id,number,"M36","PART_OF_EXISTING_COMPOSITE"))
                 continue
             # Require either multiple explicit ID lines in the current cell
