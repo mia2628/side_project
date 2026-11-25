@@ -1,0 +1,1759 @@
+# -*- coding: utf-8 -*-
+"""CAD-PART V0.7.1 — '부품목록' 기준 문자 탐색 전용 진단판.
+AutoCAD 2019 + pywin32 / Windows / 오프라인.
+실행: python cadpart_v03.py
+도면을 수정하거나 저장하지 않으며, 기존 부품 추출과 직속 부모-자식 연결 후보를 CSV로 저장합니다.
+"""
+from __future__ import annotations
+import csv
+import hashlib
+from datetime import datetime
+import json
+import math
+import re
+import sys
+import time
+import traceback
+from collections import defaultdict
+from pathlib import Path
+
+VERSION = "0.7.1"
+ROOT = Path(__file__).resolve().parent
+INPUT = ROOT / "CAD_INPUT"
+OUTPUT = ROOT / "CAD_RESULT"
+TARGET = "부품목록"
+BUSY = {-2147418111, -2147417846}
+MAX_OBJECTS = 300000
+MAX_BLOCK_DEPTH = 5
+
+def call(fn, stage, seconds=20):
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            return fn()
+        except Exception as exc:
+            hr = getattr(exc, "hresult", None)
+            if hr is None and getattr(exc, "args", None):
+                hr = exc.args[0]
+            if hr not in BUSY:
+                raise
+            if time.monotonic() >= deadline:
+                raise RuntimeError("E31_COM_BUSY:" + stage) from exc
+            try:
+                import pythoncom
+                pythoncom.PumpWaitingMessages()
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+def prop(obj, key, default=None):
+    try:
+        return call(lambda: getattr(obj, key), "get."+key)
+    except RuntimeError:
+        raise
+    except Exception:
+        return default
+
+def items(coll):
+    total = int(call(lambda: coll.Count, "Count"))
+    for i in range(total):
+        yield call(lambda j=i: coll.Item(j), "Item")
+
+def norm(s):
+    return re.sub(r"[\s\\{};._\-:()\[\]0-9]+", "", str(s or "")).replace("　", "")
+
+def token(s):
+    """Find target-bearing fragments while avoiding large unrelated strings."""
+    t = norm(s)
+    if TARGET in t:
+        return TARGET
+    if len(t) <= 4 and t and (TARGET.startswith(t) or t in TARGET):
+        return t
+    return ""
+
+def transform(a, pt):
+    x,y = float(pt[0]),float(pt[1])
+    return (a[0]*x+a[1]*y+a[4], a[2]*x+a[3]*y+a[5])
+
+IDENTITY = (1.,0.,0.,1.,0.,0.)
+
+def combine(a,b):
+    return (
+      a[0]*b[0]+a[1]*b[2], a[0]*b[1]+a[1]*b[3],
+      a[2]*b[0]+a[3]*b[2], a[2]*b[1]+a[3]*b[3],
+      a[0]*b[4]+a[1]*b[5]+a[4],
+      a[2]*b[4]+a[3]*b[5]+a[5])
+
+def block_matrix(obj):
+    p = prop(obj,"InsertionPoint",(0,0,0))
+    sx = float(prop(obj,"XScaleFactor",1) or 1)
+    sy = float(prop(obj,"YScaleFactor",1) or 1)
+    angle = float(prop(obj,"Rotation",0) or 0)
+    c,s=math.cos(angle),math.sin(angle)
+    return (sx*c,-sy*s,sx*s,sy*c,float(p[0]),float(p[1]))
+
+def collect(doc):
+    texts=[]
+    issues=[]
+    counts={"entities":0,"texts":0,"g_texts":0,"blocks":0,"skipped":0}
+    blocks=call(lambda: doc.Blocks,"Blocks")
+    def add_text(obj,space,mat,tag="text"):
+        raw_value=str(prop(obj,"TextString","") or "")
+        val=raw_value.replace("\\P"," ")
+        p=prop(obj,"InsertionPoint",None)
+        if not p or not val.strip():
+            return
+        x,y=transform(mat,p)
+        h=float(prop(obj,"Height",2.5) or 2.5)
+        layer=str(prop(obj,"Layer","") or "")
+        texts.append({"v":val,"raw":raw_value,"x":x,"y":y,"h":max(.1,abs(h)),"layer":layer,"space":space,"tag":tag})
+        counts["texts"]+=1
+        if layer.casefold()=="g":
+            counts["g_texts"]+=1
+    def scan(objects,space,mat,depth,stack):
+        for obj in items(objects):
+            counts["entities"]+=1
+            if counts["entities"]>MAX_OBJECTS:
+                raise RuntimeError("E11_ENTITY_LIMIT")
+            kind=str(prop(obj,"ObjectName",""))
+            try:
+                if kind in ("AcDbText","AcDbMText","AcDbAttribute","AcDbAttributeDefinition"):
+                    add_text(obj,space,mat)
+                elif kind in ("AcDbBlockReference","AcDbMInsertBlock"):
+                    counts["blocks"]+=1
+                    bname=str(prop(obj,"Name","") or "")
+                    # AttributeReferences are already positioned in the drawing.
+                    if bool(prop(obj,"HasAttributes",False)):
+                        try:
+                            attrs=call(lambda: obj.GetAttributes(),"GetAttributes")
+                            for at in attrs:
+                                add_text(at,space,mat,"attribute")
+                        except Exception:
+                            counts["skipped"]+=1
+                    if depth>=MAX_BLOCK_DEPTH or bname.casefold() in stack:
+                        counts["skipped"]+=1
+                        continue
+                    # XREF is not traversed by this diagnostic (reported separately).
+                    try:
+                        definition=call(lambda name=bname:blocks.Item(name),"Blocks.Item")
+                        if bool(prop(definition,"IsXRef",False)):
+                            counts["skipped"]+=1
+                            continue
+                        scan(definition,space,combine(mat,block_matrix(obj)),depth+1,stack|{bname.casefold()})
+                    except RuntimeError:
+                        raise
+                    except Exception:
+                        counts["skipped"]+=1
+            except RuntimeError:
+                raise
+            except Exception:
+                counts["skipped"]+=1
+    scan(call(lambda:doc.ModelSpace,"ModelSpace"),"MODEL",IDENTITY,0,set())
+    try:
+        layouts=call(lambda:doc.Layouts,"Layouts")
+        for layout in items(layouts):
+            name=str(prop(layout,"Name",""))
+            if name.lower()=="model":
+                continue
+            try:
+                scan(call(lambda l=layout:l.Block,"Layout.Block"),"LAYOUT:"+name,IDENTITY,0,set())
+            except RuntimeError:
+                raise
+            except Exception:
+                counts["skipped"]+=1
+    except RuntimeError:
+        raise
+    except Exception:
+        issues.append("E14_LAYOUT_UNREAD")
+    return texts,counts,issues
+
+def find_target(texts):
+    """Reconstruct 1~4 adjacent text objects left->right or top->bottom."""
+    results=[]
+    used=set()
+    byspace=defaultdict(list)
+    for i,t in enumerate(texts):
+        v=token(t["v"])
+        if v:
+            byspace[t["space"]].append((i,t,v))
+        if TARGET in norm(t["v"]):
+            key=(i,)
+            used.add(key)
+            results.append({"space":t["space"],"layer":t["layer"],"x":round(t["x"],2),"y":round(t["y"],2),
+                            "mode":"WHOLE_TEXT","objects":1,"text":"부품목록"})
+    for space,group in byspace.items():
+        for i,start,fragment in group:
+            if not TARGET.startswith(fragment) or fragment==TARGET:
+                continue
+            for direction in ("H","V"):
+                def visit(phrase,chain,current):
+                    if phrase==TARGET:
+                        ids=tuple(e[0] for e in chain)
+                        if ids not in used:
+                            used.add(ids)
+                            results.append({"space":space,"layer":start["layer"],"x":round(start["x"],2),
+                                            "y":round(start["y"],2),"mode":"JOIN_"+direction,
+                                            "objects":len(chain),"text":"부품목록"})
+                        return
+                    if len(chain)>=4:
+                        return
+                    options=[]
+                    for j,t,v in group:
+                        if j in {entry[0] for entry in chain} or not TARGET.startswith(phrase+v):
+                            continue
+                        dx=t["x"]-current["x"]
+                        dy=t["y"]-current["y"]
+                        h=max(start["h"],current["h"],t["h"],.1)
+                        if direction=="H":
+                            valid=(dx>0.05*h and dx<12*h and abs(dy)<1.25*h)
+                            dist=dx/h+2*abs(dy)/h
+                        else:
+                            valid=(dy<-.05*h and -dy<12*h and abs(dx)<1.25*h)
+                            dist=(-dy)/h+2*abs(dx)/h
+                        if valid:
+                            options.append((dist,j,t,v))
+                    for _,j,t,v in sorted(options,key=lambda q:q[0])[:8]:
+                        visit(phrase+v,chain+[(j,t,v)],t)
+                visit(fragment,[(i,start,fragment)],start)
+    # Prefer candidates near lower-right of their own text space, but never discard others.
+    return results
+
+def drawing_identity(path):
+    """Keep drawing identity independent from part identity.
+    'part_key' is a candidate only, never a confirmed assembly/part link.
+    """
+    stem = path.stem.strip()
+    normalized = re.sub(r"\s+", "", stem).upper()
+    # Only explicit sheet suffixes are considered. Other conventions remain ungrouped.
+    match = re.fullmatch(r"(.+?)(?:[_ -](?:SHEET|SH|SHT|시트)[_ -]?(\d{1,3})|\s*\((\d{1,3})\))", stem, flags=re.IGNORECASE)
+    if match and match.group(1).strip():
+        base = re.sub(r"\s+", "", match.group(1)).upper()
+        return normalized, base, "SHEET_SUFFIX_CANDIDATE"
+    return normalized, normalized, "EXACT_NAME_CANDIDATE"
+
+
+
+HEADERS = ("품번","품명","수량","부품번호","도면번호")
+
+def label_candidates(texts, anchor, word):
+    """Join nearby separate text entities along a header baseline."""
+    nearby = []
+    for index,t in enumerate(texts):
+        if t["space"] != anchor["space"]:
+            continue
+        h = max(0.1, float(t["h"]), float(anchor.get("h",2.5)))
+        if not (anchor["y"] + .1*h < t["y"] <= anchor["y"] + 32*h):
+            continue
+        if not (anchor["x"] - 220*h < t["x"] < anchor["x"] + 220*h):
+            continue
+        frag = norm(t["v"])
+        if frag and frag in word and len(frag) <= len(word):
+            nearby.append((index,t,frag))
+    results = []
+    used = set()
+    def emit(chain):
+        ids = tuple(p[0] for p in chain)
+        if ids in used:
+            return
+        used.add(ids)
+        xs = [p[1]["x"] for p in chain]
+        ys = [p[1]["y"] for p in chain]
+        hs = [p[1]["h"] for p in chain]
+        results.append({"label":word,"x":min(xs),"x_end":max(xs),
+                        "y":sum(ys)/len(ys),"h":max(hs),
+                        "pieces":len(chain),"ids":ids})
+    def search(phrase,chain,last):
+        if phrase == word:
+            emit(chain)
+            return
+        if len(chain)>=len(word):
+            return
+        options=[]
+        for idx,t,frag in nearby:
+            if idx in {p[0] for p in chain} or not word.startswith(phrase+frag):
+                continue
+            dx=t["x"]-last["x"]
+            dy=abs(t["y"]-last["y"])
+            h=max(.1,last["h"],t["h"])
+            if .05*h<dx<11*h and dy<1.4*h:
+                options.append((dx/h+2*dy/h,idx,t,frag))
+        for _,idx,t,frag in sorted(options,key=lambda q:q[0])[:8]:
+            search(phrase+frag,chain+[(idx,t,frag)],t)
+    for idx,t,frag in nearby:
+        if word.startswith(frag):
+            search(frag,[(idx,t,frag)],t)
+    results.sort(key=lambda c:(c["pieces"],c["y"]-anchor["y"]))
+    return results[:25]
+
+
+def find_headers(texts, anchors):
+    """One row per anchor, five distinct headings ordered left-to-right."""
+    output,evidence=[],[]
+    for anchor_index,anchor in enumerate(anchors,1):
+        ah=max((t["h"] for t in texts if t["space"]==anchor["space"]
+                and abs(t["x"]-anchor["x"])<=.5
+                and abs(t["y"]-anchor["y"])<=.5), default=2.5)
+        base=dict(anchor)
+        base["h"]=ah
+        opts={w:label_candidates(texts,base,w) for w in HEADERS}
+        for word in HEADERS:
+            for opt in opts[word]:
+                evidence.append({"anchor_index":anchor_index,"label":word,
+                                 "x":round(opt["x"],2),"y":round(opt["y"],2),
+                                 "pieces":opt["pieces"]})
+        best=None
+        best_score=float("inf")
+        for first in opts[HEADERS[0]]:
+            baseline=first["y"]
+            selected=[first]
+            total=0.
+            for word in HEADERS[1:]:
+                previous=selected[-1]
+                valid=[]
+                for opt in opts[word]:
+                    h=max(base["h"],opt["h"],first["h"])
+                    if (opt["x"]>previous["x_end"]+.05*h and
+                        abs(opt["y"]-baseline)<2.0*h and
+                        not any(set(opt["ids"]) & set(p["ids"]) for p in selected)):
+                        valid.append(opt)
+                if not valid:
+                    break
+                chosen=min(valid,key=lambda opt:
+                           abs(opt["y"]-baseline)/max(opt["h"],.1)+.15*opt["pieces"])
+                selected.append(chosen)
+                total+=abs(chosen["y"]-baseline)/max(chosen["h"],.1)
+            if len(selected)==5:
+                span=selected[-1]["x"]-selected[0]["x"]
+                score=total+.1*sum(o["pieces"] for o in selected)
+                score+=.012*abs(baseline-base["y"])/max(base["h"],.1)
+                if span>0 and score<best_score:
+                    best=selected
+                    best_score=score
+        count=sum(bool(opts[w]) for w in HEADERS)
+        rec={"anchor_index":anchor_index,"space":anchor["space"],
+             "anchor_x":anchor["x"],"anchor_y":anchor["y"],
+             "available_labels":count,
+             "status":"COMPLETE" if best is not None else
+                      ("PARTIAL" if count else "NOT_FOUND")}
+        if best:
+            for word,c in zip(HEADERS,best):
+                rec[word+"_x"]=round(c["x"],2)
+                rec[word+"_y"]=round(c["y"],2)
+                rec[word+"_pieces"]=c["pieces"]
+        output.append(rec)
+    return output,evidence
+
+
+# Row extraction is a candidate generator, not proof that a cell contains an actual part.
+ITEM_RE = re.compile(r"^\s*(\d{1,4})\s*[.)]?\s*$")
+MAX_ROW_STEPS = 300
+
+
+def item_number(value):
+    match = ITEM_RE.fullmatch(str(value or ""))
+    return int(match.group(1)) if match else None
+
+
+def infer_columns(header):
+    xs = [float(header[w + "_x"]) for w in HEADERS]
+    if any(b <= a for a,b in zip(xs, xs[1:])):
+        return None
+    gaps = [xs[i+1]-xs[i] for i in range(4)]
+    if min(gaps) <= 0:
+        return None
+    # Header positions approximate column starts. These are provisional boundaries.
+    return [xs[0]-max(2.0,.4*gaps[0])] + [
+        (xs[i]+xs[i+1])/2 for i in range(4)
+    ] + [xs[-1]+max(5.0,.9*gaps[-1])]
+
+
+def extract_bom_rows(texts, header):
+    """Find item 1 immediately above header, group successive numbered rows.
+    Current version covers the anchored right-hand table; left continuation pending.
+    """
+    issues=[]
+    if header["status"] != "COMPLETE":
+        return [], [("E50","HEADER_INCOMPLETE")]
+    bounds = infer_columns(header)
+    if bounds is None:
+        return [], [("E50","BAD_HEADER_COLUMNS")]
+    space = header["space"]
+    header_y = sum(float(header[w+"_y"]) for w in HEADERS)/5
+    htxt = [t for t in texts if t["space"]==space and
+            bounds[0] <= t["x"] < bounds[-1] and t["y"] > header_y]
+    if not htxt:
+        return [], [("E51","NO_TEXT_ABOVE_HEADER")]
+    # Ordinal cell is the first of five columns; all other text stays as field content.
+    ordinals = [(item_number(t["v"]),t) for t in htxt if bounds[0] <= t["x"] < bounds[1]]
+    ordinals = [(n,t) for n,t in ordinals if n is not None and n >= 1]
+    if not ordinals:
+        return [], [("E51","NO_ITEM_NUMBERS")]
+    ones = [t for n,t in ordinals if n==1]
+    if not ones:
+        return [], [("N01","NO_1_ROW_IN_HEADER_AREA")]
+    # Restrict 1 to the first rows above header: revision tables elsewhere
+    # may contain a numeral 1 but are not a parts list.
+    nearby_ones = [t for t in ones
+                   if 0 < t["y"]-header_y < max(16.0, 8*float(t["h"]))]
+    if not nearby_ones:
+        return [], [("N01","NO_1_ROW_NEAR_HEADER")]
+    one = min(nearby_ones,key=lambda t:t["y"]-header_y)
+    heights = sorted(max(.5,float(t["h"])) for t in htxt)
+    typical_h = heights[len(heights)//2]
+    same_line_tolerance = max(.7,typical_h*.9)
+    ordered = sorted(((n,t) for n,t in ordinals if t["y"]>=one["y"]-same_line_tolerance),
+                     key=lambda z:z[1]["y"])
+    rows=[]
+    expected=1
+    prev_y=header_y
+    seen=set()
+    for number, ordinal in ordered:
+        if len(rows)>=MAX_ROW_STEPS:
+            issues.append(("E55","MAX_ROWS_REACHED"))
+            break
+        if number < expected:
+            continue
+        if number > expected:
+            # We do not skip a gap and accidentally include a revision or notes table.
+            issues.append(("E53","NUMBER_SEQUENCE_GAP"))
+            break
+        y=float(ordinal["y"])
+        if y<=prev_y:
+            continue
+        if number>1 and y-prev_y>max(typical_h*12,50.0):
+            issues.append(("E54","UNUSUAL_ROW_SPACING"))
+            break
+        if number==1 and y-header_y>max(typical_h*14,50.0):
+            issues.append(("E54","ITEM_1_TOO_FAR_FROM_HEADER"))
+            break
+        key=(number,round(y,1))
+        if key in seen:
+            continue
+        seen.add(key)
+        members=[t for t in htxt if abs(t["y"]-y)<=same_line_tolerance]
+        cells=[[] for _ in range(5)]
+        for t in members:
+            for col in range(5):
+                if bounds[col] <= t["x"] < bounds[col+1]:
+                    cells[col].append(t)
+                    break
+        def combine_cell(tokens):
+            return " ".join(t["v"].strip() for t in sorted(tokens,key=lambda q:q["x"])
+                            if t["v"].strip())
+        values=[combine_cell(x) for x in cells]
+        # Strictly validate ordinal cell: avoid revision numbers joined on same line.
+        if item_number(values[0])!=number:
+            issues.append(("E52","ORDINAL_CELL_CONFLICT"))
+            break
+        qpa = item_number(values[2])
+        valid=bool(values[1] and (values[3] or values[4]) and qpa and qpa>0)
+        rows.append({"item_no":number,"part_name":values[1],
+                     "qpa":qpa if qpa else "",
+                     "part_number":values[3],"drawing_number":values[4],
+                     "y":round(y,3),"status":"CANDIDATE" if valid else "REVIEW_REQUIRED"})
+        if not valid:
+            issues.append(("E52","INCOMPLETE_ITEM_ROW"))
+        expected+=1
+        prev_y=y
+    if not rows:
+        issues.append(("N01","NO_VERIFIED_ITEM_ROWS"))
+    return rows,issues
+
+
+
+# ---------------------------------------------------------------------------
+# V0.6.4 ADDITIVE table/merged-name recognition.
+# The tested V0.6.3 find_target(), find_headers(), extract_bom_rows(),
+# resilient_open(), and collect() are deliberately left unchanged.
+# No item is synthesized to match an expected total.
+# ---------------------------------------------------------------------------
+
+def _field_text(tokens):
+    return " ".join(str(t["v"]).strip() for t in
+                    sorted(tokens,key=lambda z:(-z["y"],z["x"]))
+                    if str(t["v"]).strip())
+
+
+def _lines_inside(token):
+    # One AutoCAD MText entity may contain multiple lines with distinct part IDs.
+    value=str(token.get("v","")).replace("\\P","\n")
+    return [p.strip() for p in re.split(r"[\r\n]+",value) if p.strip()]
+
+
+def _row_line_groups(texts, row_y, next_y, low_y, bounds, space, typical_h):
+    """Return all relevant text entities in the region of an ordinal cell."""
+    lower = max(low_y, row_y-1.8*typical_h)
+    upper = (row_y+next_y)/2 if next_y is not None else row_y+6*typical_h
+    return [[t for t in texts
+             if t["space"]==space and
+             bounds[i] <= t["x"] < bounds[i+1] and
+             lower <= t["y"] < upper] for i in range(5)]
+
+
+def expand_merged_part_rows(texts, header, existing, table_id="T1"):
+    """Split rows only when there are >=2 explicit part-ID text lines.
+
+    Preserve every original primary row when the part number is ambiguous.
+    Same displayed part name is carried down, never used as an identity key.
+    """
+    if not existing:
+        return [], []
+    bounds=infer_columns(header)
+    if bounds is None:
+        return [dict(r,table_id=table_id,subrow_id=1,source_kind="PRIMARY") for r in existing], []
+    space=header["space"]
+    ys=sorted(set(float(r["y"]) for r in existing))
+    hs=sorted(float(t["h"]) for t in texts if t["space"]==space and
+              bounds[0] <= t["x"] < bounds[-1])
+    typical=max(.5,hs[len(hs)//2]) if hs else 2.5
+    head_y=sum(float(header[w+"_y"]) for w in HEADERS)/5
+    out=[]
+    alerts=[]
+    for rec in existing:
+        y=float(rec["y"])
+        next_y=next((q for q in ys if q>y+.15*typical),None)
+        cols=_row_line_groups(texts,y,next_y,head_y,bounds,space,typical)
+        # Count distinct part-number objects/explicit lines, not spaces.
+        part_entries=[]
+        for t in cols[3]:
+            for part in _lines_inside(t):
+                if norm(part) and part not in HEADERS:
+                    part_entries.append((float(t["y"]),part))
+        # Never collapse a source row when there is no strong multi-part signal.
+        if len(part_entries)<2:
+            out.append(dict(rec,table_id=table_id,subrow_id=1,source_kind="PRIMARY"))
+            continue
+        # Do not accidentally split a long part number made of fragments
+        # along the same baseline; mark it for review instead.
+        unique_ys={round(item[0]/max(typical*.7,.4)) for item in part_entries}
+        if len(unique_ys)<2 and all(len(_lines_inside(t))==1 for t in cols[3]):
+            out.append(dict(rec,table_id=table_id,subrow_id=1,
+                            source_kind="PRIMARY",status="REVIEW_REQUIRED"))
+            alerts.append(("M12","MULTIPLE_PART_FRAGMENTS_SAME_BASELINE"))
+            continue
+        # If a single MText object has explicit line breaks, split by source
+        # line order without inventing intermediate vertical coordinates.
+        parts=sorted(part_entries,key=lambda q:-q[0])
+        q_entries=[]
+        for t in cols[2]:
+            q_entries.extend((float(t["y"]),v) for v in _lines_inside(t))
+        d_entries=[]
+        for t in cols[4]:
+            d_entries.extend((float(t["y"]),v) for v in _lines_inside(t))
+        def pair_value(values,idx,ref_y):
+            if len(values)==len(parts):
+                ordered=sorted(values,key=lambda q:-q[0])
+                return ordered[idx][1]
+            if len(values)==1:
+                return values[0][1]
+            if values:
+                nearest=min(values,key=lambda q:abs(q[0]-ref_y))
+                if abs(nearest[0]-ref_y)<=typical*1.5:
+                    return nearest[1]
+            return ""
+        for sub,(py,part) in enumerate(parts,1):
+            nr=dict(rec)
+            nr["part_number"]=part
+            nr["qpa"]=pair_value(q_entries,sub-1,py)
+            nr["drawing_number"]=pair_value(d_entries,sub-1,py)
+            nr["table_id"]=table_id
+            nr["subrow_id"]=sub
+            nr["source_kind"]="MERGED_NAME"
+            nr["status"]="REVIEW_REQUIRED" if len(q_entries) not in (1,len(parts)) else "CANDIDATE"
+            out.append(nr)
+        alerts.append(("M11","SPLIT_EXPLICIT_PART_NUMBERS:"+str(len(parts))))
+    return out,alerts
+
+
+def _continuation_table(texts,primary_header,start_num,first_x,shift,
+                        used_keys,table_id):
+    """Attempt one headerless table using the verified first-table column geometry."""
+    bounds0=infer_columns(primary_header)
+    if bounds0 is None:
+        return [],"INVALID_BOUNDS"
+    bounds=[x+shift for x in bounds0]
+    space=primary_header["space"]
+    ordinal=[(item_number(t["v"]),t) for t in texts
+             if t["space"]==space and
+             bounds[0] <= t["x"] < bounds[1]]
+    # The starting ordinal anchors this table, with rows increasing upward.
+    starts=[t for n,t in ordinal if n==start_num and abs(t["x"]-first_x)<4*max(t["h"],.5)]
+    if not starts:
+        return [],"NO_FIRST_NUMBER"
+    first=min(starts,key=lambda z:abs(z["x"]-first_x))
+    h=max(.5,float(first["h"]))
+    candidates=sorted(((n,t) for n,t in ordinal if n is not None
+                       and t["y"] >= first["y"]-h and n>=start_num),
+                      key=lambda q:q[1]["y"])
+    rows=[]
+    expect=start_num
+    prev_y=float(first["y"])-2*h
+    for n,t in candidates:
+        if len(rows)>=MAX_ROW_STEPS:
+            break
+        if n!=expect:
+            if n>expect:
+                break
+            continue
+        y=float(t["y"])
+        if y<=prev_y or (rows and y-prev_y>max(12*h,50)):
+            continue
+        # Require actual text in the adjacent designated data columns.
+        cells=[[z for z in texts if z["space"]==space and
+                bounds[i] <= z["x"] < bounds[i+1] and
+                abs(z["y"]-y)<1.0*max(h,float(z["h"]))]
+               for i in range(5)]
+        fields=[_field_text(c) for c in cells]
+        if item_number(fields[0]) != n:
+            if not rows:
+                return [],"BAD_ITEM_CELL"
+            break
+        part=fields[3]
+        drawing=fields[4]
+        name=fields[1]
+        if not part and not drawing:
+            if not rows:
+                return [],"NO_PART_IDENTIFIER"
+            break
+        key=(table_id,n,round(y,1))
+        if key in used_keys:
+            break
+        qty=item_number(fields[2])
+        row={"item_no":n,"part_name":name,"qpa":qty if qty else "",
+             "part_number":part,"drawing_number":drawing,
+             "y":round(y,3),
+             "status":"CANDIDATE" if name and qty and (part or drawing)
+                      else "REVIEW_REQUIRED",
+             "table_id":table_id,"subrow_id":1,
+             "source_kind":"LEFT_CONTINUATION"}
+        rows.append(row)
+        prev_y=y
+        expect+=1
+    # Two consecutive numbered rows reduce false positives from revision tables.
+    # Single-row continuation can still be flagged, but not auto-added.
+    return (rows,"ACCEPTED") if len(rows)>=2 else ([], "INSUFFICIENT_SUPPORT")
+
+
+def find_left_continuations(texts,header,primary_rows,used_keys):
+    """Walk left from anchored table by requiring consecutive ordinal rows.
+
+    Header/anchor recognition itself is never altered. A left region is accepted
+    only with two adjacent increasing numbers plus part-number/drawing fields.
+    """
+    if not primary_rows:
+        return [],[],[]
+    xs=[float(header[w+"_x"]) for w in HEADERS]
+    full_width=xs[-1]-xs[0]
+    if full_width<=0:
+        return [],[],[]
+    space=header["space"]
+    all_rows=[]
+    table_audit=[]
+    alerts=[]
+    current_left=xs[0]
+    expected=max(int(r["item_no"]) for r in primary_rows)+1
+    table_no=2
+    # Search each predecessor to the left, up to seven continuation tables.
+    for _ in range(7):
+        starters=[]
+        for t in texts:
+            if t["space"]!=space or item_number(t["v"])!=expected:
+                continue
+            x=float(t["x"])
+            if not (current_left-2.8*full_width<x<current_left-.40*full_width):
+                continue
+            starters.append(t)
+        options=[]
+        for t in starters:
+            x=float(t["x"])
+            shift=x-xs[0]
+            tid="T"+str(table_no)
+            trial,reason=_continuation_table(texts,header,expected,x,shift,
+                                             used_keys,tid)
+            table_audit.append({"table_id":tid,"left_x":round(x,2),
+                                "start_item":expected,"candidate_count":len(trial),
+                                "decision":reason})
+            if trial:
+                options.append((len(trial),abs(current_left-x-full_width),x,trial))
+        if not options:
+            if starters:
+                alerts.append(("M22","LEFT_TABLE_CANDIDATES_NEED_REVIEW"))
+            break
+        chosen=sorted(options,key=lambda p:(-p[0],p[1]))[0]
+        _,_,current_left,selected=chosen
+        for r in selected:
+            used_keys.add((r["table_id"],r["item_no"],round(float(r["y"]),1)))
+        all_rows.extend(selected)
+        expected=max(int(r["item_no"]) for r in selected)+1
+        table_no+=1
+    return all_rows,table_audit,alerts
+
+
+
+# Additive lower-cell recovery for merged-name groups. Never alters v0.6.4 rows.
+def _part_fragments(token):
+    """Explicit MText lines only; a normal spaced value remains one item."""
+    raw=str(token.get("raw", token.get("v","")) or "")
+    raw=raw.replace("\\P","\n")
+    return [p.strip() for p in re.split(r"[\r\n]+",raw) if p.strip()]
+
+
+def _part_norm(value):
+    return re.sub(r"\s+","",str(value or "")).casefold()
+
+
+def _cell_tokens_in_band(texts, bounds, space, col, lower, upper):
+    return [t for t in texts if t["space"]==space
+            and bounds[col] <= float(t["x"]) < bounds[col+1]
+            and lower <= float(t["y"]) < upper]
+
+
+def _qty_for_lower_candidate(texts,bounds,space,y,h):
+    """Return a quantity only if it has one unambiguous nearby numeric match."""
+    qtys=[]
+    for t in _cell_tokens_in_band(texts,bounds,space,2,y-h*.7,y+h*.7):
+        for v in _part_fragments(t):
+            n=item_number(v)
+            if n is not None and n>0:
+                qtys.append(n)
+    return qtys[0] if len(qtys)==1 else ""
+
+
+def _drawing_for_lower_candidate(texts,bounds,space,y,h):
+    vals=[]
+    for t in _cell_tokens_in_band(texts,bounds,space,4,y-h*.7,y+h*.7):
+        vals.extend(_part_fragments(t))
+    return vals[0] if len(vals)==1 else ""
+
+
+def recover_merged_lower_rows(texts,header,source_rows,table_id):
+    """Recover explicit lower part numbers inside one ordinal's vertical band.
+
+    This supplement is conservative: it only adds identifiers not represented
+    by the current table/ordinal output. It never replaces trusted 0.6.4 rows.
+    Lower band ends at the next ordinal's midpoint (or the verified header).
+    """
+    bounds=infer_columns(header)
+    if bounds is None or not source_rows:
+        return [],[],[]
+    space=header["space"]
+    header_y=sum(float(header[w+"_y"]) for w in HEADERS)/5
+    ordered=sorted(source_rows,key=lambda r:float(r["y"]))
+    # Keep one ordinal position per item number, even after V064 subrow splitting.
+    ordinal={}
+    for row in ordered:
+        ordinal.setdefault(int(row["item_no"]),row)
+    anchors=sorted(ordinal.values(),key=lambda r:float(r["y"]))
+    hs=sorted(max(.3,float(t["h"])) for t in texts if t["space"]==space
+              and bounds[0]<=float(t["x"])<bounds[-1] and
+              float(t["y"])>=header_y)
+    h=hs[len(hs)//2] if hs else 2.5
+    extras=[]
+    audit=[]
+    warnings=[]
+    for idx,row in enumerate(anchors):
+        y=float(row["y"])
+        prev=float(anchors[idx-1]["y"]) if idx>0 else header_y
+        next_y=float(anchors[idx+1]["y"]) if idx+1<len(anchors) else None
+        # Deliberately extend below original y (v0.6.4 used only y-1.8*h).
+        lower=max(header_y+.15*h,prev+.25*h)
+        upper=(y+next_y)/2 if next_y is not None else y+max(3*h, 12.0)
+        # Safety: candidate must be within finite distance of known item.
+        lower=max(lower,y-16*h)
+        upper=min(upper,y+16*h)
+        if lower>=upper:
+            continue
+        number=int(row["item_no"])
+        represented={_part_norm(q["part_number"]) for q in source_rows
+                     if int(q["item_no"])==number and q.get("part_number")}
+        all_cells=_cell_tokens_in_band(texts,bounds,space,3,lower,upper)
+        candidate_entries=[]
+        for t in all_cells:
+            fragments=_part_fragments(t)
+            for line_idx,part in enumerate(fragments):
+                if (not part or item_number(part) is not None or
+                        part in HEADERS):
+                    continue
+                # MText line number preserves order, not fabricated physical Y.
+                candidate_entries.append((float(t["y"]),line_idx,part,t))
+        normalized_seen=set()
+        for cy,line_idx,part,token in sorted(candidate_entries,
+                                             key=lambda e:(-e[0],e[1],e[2])):
+            key=_part_norm(part)
+            if not key or key in normalized_seen:
+                continue
+            normalized_seen.add(key)
+            if key in represented:
+                continue
+            # A repeated split cell may have been retained in the original
+            # row as a joined string; do not create a false additional part.
+            raw_existing=[str(q["part_number"]) for q in source_rows
+                          if int(q["item_no"])==number and q.get("part_number")]
+            if any((" " in value or "\\n" in value) and
+                   key in _part_norm(value) and len(key)>=4
+                   for value in raw_existing):
+                audit.append((table_id,number,"M36","PART_OF_EXISTING_COMPOSITE"))
+                continue
+            # Require either multiple explicit ID lines in the current cell
+            # or a separate lower text object under a represented part number.
+            lower_than_anchor=(cy < y-.6*h)
+            multiline=(len(_part_fragments(token))>1)
+            has_other_part=bool(represented)
+            if not has_other_part or not (lower_than_anchor or multiline):
+                continue
+            qpa=_qty_for_lower_candidate(texts,bounds,space,cy,h)
+            dno=_drawing_for_lower_candidate(texts,bounds,space,cy,h)
+            base=ordinal[number]
+            new=dict(base)
+            new.update({
+                "part_number":part,
+                "qpa":qpa,
+                "drawing_number":dno,
+                "table_id":table_id,
+                "subrow_id":100+len(extras)+1,
+                "source_kind":"MERGED_LOWER_RECOVERY",
+                "status":"REVIEW_REQUIRED",
+                "y":round(cy,3)
+            })
+            extras.append(new)
+            represented.add(key)
+            audit.append((table_id,number,"M31","LOWER_PART_RECOVERED"))
+            warnings.append(("M31","MERGED_LOWER_RECOVERED"))
+    return extras,audit,warnings
+
+
+
+# V0.6.6: Post-filter ONLY the additive V0.6.5 lower-row recovery.
+# The previously verified anchored/left-table candidate pipeline is unchanged.
+def _identifiers_from_existing(cell):
+    """Exact components of a composite part-number cell, not substrings."""
+    if not cell:
+        return set()
+    text_value=str(cell).replace("\\P","\n")
+    return {_part_norm(p) for p in re.split(r"[\r\n,;]+",text_value)
+            if _part_norm(p)}
+
+
+def _near_duplicate_recoveries(rows):
+    """Keep baseline intact; suppress only evidenced overlap of lower candidates.
+
+    A near-adjacent ordinal is considered only when identical part identifiers
+    have been observed in that ordinal's existing part-number field.
+    Ambiguous ownership is retained in a separate review file instead of
+    silently being counted as a confirmed new item.
+    """
+    kept=[]
+    suppressed=[]
+    uncertain=[]
+    audit=[]
+    base=[r for r in rows if r.get("source_kind")!="MERGED_LOWER_RECOVERY"]
+    seen={}
+    bygroup=defaultdict(list)
+    for r in base:
+        bygroup[(r["drawing_index"],r["anchor_index"],r["table_id"])].append(r)
+    for r in rows:
+        if r.get("source_kind")!="MERGED_LOWER_RECOVERY":
+            kept.append(r)
+            continue
+        key=_part_norm(r.get("part_number"))
+        group=(r["drawing_index"],r["anchor_index"],r["table_id"])
+        y=float(r["y"])
+        ordinal=int(r["item_no"])
+        others=bygroup.get(group,[])
+        positions=sorted(set(float(p["y"]) for p in others))
+        gaps=[b-a for a,b in zip(positions,positions[1:]) if b>a]
+        pitch=sorted(gaps)[len(gaps)//2] if gaps else 4.0
+        # Keep a strict tolerance smaller than the average row separation.
+        proximity=max(0.65, min(pitch*.40, 4.0))
+        reason=""
+        for existing in others:
+            old=_part_norm(existing.get("part_number"))
+            if not old:
+                continue
+            pieces=_identifiers_from_existing(existing.get("part_number"))
+            if key==old or key in pieces:
+                # Exact same part and ordinal -> duplicate; nearby different
+                # ordinal with same part and row coordinate -> overlap.
+                if ordinal==int(existing["item_no"]):
+                    reason="M41_ALREADY_IN_SAME_ORDINAL"
+                    break
+                if abs(y-float(existing["y"]))<=proximity:
+                    reason="M42_OVERLAP_NEIGHBOR_ORDINAL"
+                    break
+        if not reason:
+            compound=(group,ordinal,key)
+            if compound in seen:
+                reason="M43_DUPLICATE_RECOVERY_ID"
+            else:
+                seen[compound]=y
+        if reason:
+            suppressed.append(dict(r,review_reason=reason))
+            audit.append({"drawing_index":r["drawing_index"],"drawing":r["drawing"],
+                          "anchor_index":r["anchor_index"],"table_id":r["table_id"],
+                          "item_no":ordinal,"code":reason,"detail":"FILTERED_RECOVERY"})
+            continue
+        # Strong warning for a candidate extremely close to another ordinal,
+        # but with no duplicate identity evidence. Preserve it for review.
+        nearby_ordinal=any(int(p["item_no"])!=ordinal
+                            and abs(y-float(p["y"])) <= proximity
+                            for p in others)
+        if nearby_ordinal:
+            uncertain.append(dict(r,review_reason="M44_NEIGHBOR_ROW_OWNERSHIP"))
+            audit.append({"drawing_index":r["drawing_index"],"drawing":r["drawing"],
+                          "anchor_index":r["anchor_index"],"table_id":r["table_id"],
+                          "item_no":ordinal,"code":"M44","detail":"REVIEW_OWNERSHIP"})
+            # Do not count ambiguous records as confirmed but never erase them.
+            continue
+        kept.append(r)
+    return kept,suppressed,uncertain,audit
+
+
+
+# V0.7.0: direct DWG -> BOM occurrence -> matching DWG graph.
+# The V0.6.6 component extraction functions are intentionally not modified.
+# No arbitrary top-level assembly and no transitive edges are invented.
+def _link_id(raw):
+    """Strict case/whitespace normalization only. Do NOT remove punctuation
+    or apply fuzzy/substring matching to part numbers and drawing numbers."""
+    return re.sub(r"\s+","",str(raw or "")).upper()
+
+
+def _graph_escape(value):
+    return str(value).replace("\\","\\\\").replace('"','\\"').replace("\n"," ")
+
+
+def build_direct_hierarchy(drawing_index, part_rows):
+    """Build a graph from the already-extracted rows. Zero AutoCAD COM calls.
+
+    A BOM occurrence always belongs to exactly the DWG where it was
+    extracted. Only its *expansion* to a child DWG is a matching candidate.
+    No other parent-child relation is generated merely by filename matches.
+    """
+    drawings=[]
+    idx={}
+    index_by_id=defaultdict(set)
+    for d in drawing_index:
+        di=int(d["drawing_index"])
+        name=str(d["file"])
+        key=_link_id(d["drawing_key"])
+        part_key=_link_id(d["part_key_candidate"])
+        rec={"drawing_index":di,"drawing":name,
+             "drawing_key":key,"part_key_candidate":part_key,
+             "status":d["status"],"header_complete_count":d["header_complete_count"]}
+        drawings.append(rec)
+        idx[di]=rec
+        for match_key in {key,part_key}:
+            if match_key:
+                index_by_id[match_key].add(di)
+    occurrences=[]
+    links=[]
+    link_validation=[]
+    for count,row in enumerate(part_rows,1):
+        parent=int(row["drawing_index"])
+        part=_link_id(row.get("part_number"))
+        dwg=_link_id(row.get("drawing_number"))
+        # Keep every direct child occurrence regardless of its own DWG presence.
+        occ={"occurrence_id":"O%05d" % count,
+             "parent_drawing_index":parent,
+             "parent_drawing":idx[parent]["drawing"],
+             "parent_part_candidate":idx[parent]["part_key_candidate"],
+             "item_no":row["item_no"],"subrow_id":row["subrow_id"],
+             "table_id":row["table_id"],
+             "child_part_number":row["part_number"],
+             "child_drawing_number":row["drawing_number"],
+             "child_name":row["part_name"],"qpa":row["qpa"],
+             "source_kind":row["source_kind"],
+             "source_row_status":row["status"],
+             "match_status":"", "linked_drawing_count":0}
+        p_match=set(index_by_id.get(part,set())) if part else set()
+        d_match=set(index_by_id.get(dwg,set())) if dwg else set()
+        # If both fields contain matches, any conflicting evidence is a review.
+        candidates=p_match|d_match
+        candidates.discard(parent) # self-reference is a warning, not an edge
+        self_hit=parent in (p_match|d_match)
+        if not candidates:
+            status="SELF_REFERENCE_REVIEW" if self_hit else "NO_CHILD_DWG_IN_INPUT"
+        elif len(candidates)>1:
+            status="AMBIGUOUS_MULTIPLE_DRAWINGS"
+        else:
+            child=next(iter(candidates))
+            if p_match and d_match and p_match!=d_match:
+                status="CONFLICTING_PART_VS_DRAWING"
+            elif self_hit:
+                status="SELF_AND_OTHER_DRAWING"
+            else:
+                status="EXACT_CANDIDATE"
+        occ["match_status"]=status
+        occ["linked_drawing_count"]=len(candidates)
+        occurrences.append(occ)
+        if status!="EXACT_CANDIDATE":
+            link_validation.append({"occurrence_id":occ["occurrence_id"],
+                                    "parent_drawing":occ["parent_drawing"],
+                                    "code":status,
+                                    "candidate_count":len(candidates)})
+        # Write ambiguous candidates too; never silently choose a parent/child.
+        for child in sorted(candidates):
+            evidence=("PART_NUMBER_EXACT" if child in p_match else "") + (
+                      "+DRAWING_NUMBER_EXACT" if child in d_match and child in p_match
+                      else "DRAWING_NUMBER_EXACT" if child in d_match else "")
+            links.append({"occurrence_id":occ["occurrence_id"],
+                          "parent_drawing_index":parent,
+                          "parent_drawing":idx[parent]["drawing"],
+                          "child_drawing_index":child,
+                          "child_drawing":idx[child]["drawing"],
+                          "item_no":row["item_no"],
+                          "table_id":row["table_id"],"subrow_id":row["subrow_id"],
+                          "child_part_number":row["part_number"],
+                          "child_drawing_number":row["drawing_number"],
+                          "qpa":row["qpa"],
+                          "evidence":evidence,"status":status})
+    # Detect cycles among unique exact drawing links without setting a global root.
+    adjacency=defaultdict(set)
+    for edge in links:
+        if edge["status"]=="EXACT_CANDIDATE":
+            adjacency[edge["parent_drawing_index"]].add(edge["child_drawing_index"])
+    def reachable(start,target):
+        stack=[start]
+        visited=set()
+        while stack:
+            node=stack.pop()
+            if node==target:
+                return True
+            if node in visited:continue
+            visited.add(node)
+            stack.extend(adjacency.get(node,set())-visited)
+        return False
+    cycles=0
+    for edge in links:
+        if edge["status"]!="EXACT_CANDIDATE":continue
+        u=edge["parent_drawing_index"]
+        v=edge["child_drawing_index"]
+        if reachable(v,u):
+            edge["status"]="CYCLE_REVIEW"
+            cycles+=1
+            link_validation.append({"occurrence_id":edge["occurrence_id"],
+                                    "parent_drawing":edge["parent_drawing"],
+                                    "code":"CYCLE_REVIEW","candidate_count":1})
+    # Edges that can be inspected as a graph. Status remains provisional:
+    # filename identity is NOT proof of an engineering parent-child relationship.
+    confirmed_like=[e for e in links if e["status"]=="EXACT_CANDIDATE"]
+    dot=['digraph DirectBOM {',
+         '  graph [rankdir=LR, label="DWG direct connection CANDIDATES", labelloc=t];',
+         '  node [shape=box];']
+    for d in drawings:
+        dot.append('  "D%d" [label="%s"];' % (
+            d["drawing_index"],_graph_escape(d["drawing"])))
+    for e in confirmed_like:
+        dot.append('  "D%d" -> "D%d" [label="%s"];' % (
+            e["parent_drawing_index"],e["child_drawing_index"],
+            _graph_escape(str(e["item_no"])+"/"+str(e["qpa"]))))
+    dot.append('}')
+    stats={"direct_occurrences":len(occurrences),
+           "exact_candidate_links":len(confirmed_like),
+           "review_link_candidates":sum(
+               e["status"]!="EXACT_CANDIDATE" for e in links),
+           "unlinked_occurrences":sum(
+               o["match_status"]=="NO_CHILD_DWG_IN_INPUT" for o in occurrences),
+           "cycle_review_edges":cycles,
+           "drawing_nodes":len(drawings)}
+    return drawings,occurrences,links,link_validation,"\n".join(dot)+"\n",stats
+
+
+
+
+# V0.7.1: safe SECONDARY discovery of filename-embedded identifiers.
+# Do not change V0.6.6 extraction or V0.7.0 exact graph linkage.
+# Filename/part-number near matches remain REVIEW CANDIDATES, never direct edges.
+def _id_alnum(value):
+    """Remove only typical separators; retain letters and digits."""
+    return re.sub(r"[^A-Z0-9가-힣]","",str(value or "").upper())
+
+
+def _safe_identifier(value):
+    value=_id_alnum(value)
+    return value if len(value)>=6 and any(ch.isdigit() for ch in value) else ""
+
+
+def diagnose_drawing_ids(drawing_index,part_rows,occurrences):
+    """Identify likely matching failures using already-scanned data, no COM.
+
+    Output candidates, NOT inferred engineering relations. Contains input
+    strings for local verification only; do not publish raw CSVs.
+    """
+    nodes=[]
+    for d in drawing_index:
+        stem=Path(str(d["file"])).stem
+        candidate=str(d.get("part_key_candidate",""))
+        nodes.append({"drawing_index":int(d["drawing_index"]),
+                      "drawing":str(d["file"]),
+                      "stem":stem,
+                      "stem_normalized":_id_alnum(stem),
+                      "part_key_normalized":_id_alnum(candidate),
+                      "status":str(d.get("status",""))})
+    by_parent={int(o["occurrence_id"][1:]):o for o in occurrences}
+    near=[]; fields=[]
+    raw_ids=0
+    with_usable=0
+    exact_potential=0
+    for k,row in enumerate(part_rows,1):
+        parent=int(row["drawing_index"])
+        part=str(row.get("part_number","") or "")
+        dwg=str(row.get("drawing_number","") or "")
+        occurrence="O%05d"%k
+        for label,value in (("PART_NUMBER",part),("DRAWING_NUMBER",dwg)):
+            value=value.strip()
+            if not value:
+                fields.append({"occurrence_id":occurrence,"field":label,
+                               "result":"EMPTY","candidate_count":0})
+                continue
+            raw_ids+=1
+            identifier=_safe_identifier(value)
+            if not identifier:
+                fields.append({"occurrence_id":occurrence,"field":label,
+                               "result":"TOO_SHORT_OR_UNSTRUCTURED","candidate_count":0})
+                continue
+            with_usable+=1
+            hits=[]
+            for node in nodes:
+                child=node["drawing_index"]
+                if child==parent:
+                    continue
+                stem=node["stem_normalized"]
+                pid=node["part_key_normalized"]
+                if identifier==stem or identifier==pid:
+                    reason="SEPARATOR_INSENSITIVE_EXACT"
+                    priority=2
+                elif identifier in stem:
+                    # The entire normalized part ID is embedded in the
+                    # filename. This is not automatically a valid match.
+                    reason="IDENTIFIER_INSIDE_FILENAME"
+                    priority=1
+                else:
+                    continue
+                hits.append((priority,child,reason))
+            if not hits:
+                fields.append({"occurrence_id":occurrence,"field":label,
+                               "result":"NO_FILENAME_MATCH","candidate_count":0})
+            else:
+                max_priority=max(a for a,_,_ in hits)
+                if max_priority==2:
+                    exact_potential+=1
+                fields.append({"occurrence_id":occurrence,"field":label,
+                               "result":"REVIEW_MATCH_FOUND","candidate_count":len(hits)})
+                for priority,child,reason in sorted(hits,reverse=True):
+                    node=next(n for n in nodes if n["drawing_index"]==child)
+                    near.append({
+                        "occurrence_id":occurrence,"parent_drawing_index":parent,
+                        "parent_drawing":str(row.get("drawing","") or ""),
+                        "child_drawing_index":child,
+                        "child_drawing":node["drawing"],
+                        "item_no":row["item_no"],"table_id":row["table_id"],
+                        "source_field":label,"source_identifier":value,
+                        "match_rule":reason,"status":"REVIEW_ONLY",
+                        "matching_priority":priority})
+    summary={
+       "drawing_count":len(nodes),"part_occurrence_count":len(part_rows),
+       "identifier_fields_nonempty":raw_ids,"identifier_fields_usable":with_usable,
+       "field_matches_normalized_exact":exact_potential,
+       "field_matches_review":sum(f["result"]=="REVIEW_MATCH_FOUND" for f in fields),
+       "near_candidate_rows":len(near),
+       "near_candidate_occurrences":len({m["occurrence_id"] for m in near}),
+       "diagnosis":"Near matches are review candidates; direct graph unchanged"
+    }
+    return nodes,fields,near,summary
+
+
+def diagnostic_selftest():
+    docs=[
+      {"drawing_index":1,"file":"PARENT-100.dwg","drawing_key":"PARENT-100",
+       "part_key_candidate":"PARENT-100","status":"HEADER_COMPLETE"},
+      {"drawing_index":2,"file":"ABC-12345_REV-A.dwg","drawing_key":"ABC-12345_REV-A",
+       "part_key_candidate":"ABC-12345_REV-A","status":"NO_ANCHOR"},
+      {"drawing_index":3,"file":"OTHER-98765.dwg","drawing_key":"OTHER-98765",
+       "part_key_candidate":"OTHER-98765","status":"NO_ANCHOR"}
+    ]
+    rows=[{"drawing_index":1,"part_number":"ABC-12345",
+           "drawing_number":"","item_no":1,"table_id":"T1"}]
+    occ=[{"occurrence_id":"O00001"}]
+    _,fields,candidates,stats=diagnose_drawing_ids(docs,rows,occ)
+    assert len(candidates)==1,"One filename-embedded identifier should be diagnosed"
+    assert candidates[0]["child_drawing_index"]==2
+    assert candidates[0]["status"]=="REVIEW_ONLY"
+    assert stats["near_candidate_occurrences"]==1
+    print("V0.7.1|DIAG_SELFTEST|PASS|FILENAME_EMBEDDED_REVIEW_ONLY")
+    return 0
+
+
+def hierarchy_selftest():
+    """Offline synthetic checks: no COM, no user drawing, no external modules."""
+    docs=[
+        {"drawing_index":1,"file":"ASSEMBLY_A.dwg","drawing_key":"ASSEMBLY_A",
+         "part_key_candidate":"ASSEMBLY_A","status":"HEADER_COMPLETE","header_complete_count":1},
+        {"drawing_index":2,"file":"CHILD_B.dwg","drawing_key":"CHILD_B",
+         "part_key_candidate":"CHILD_B","status":"HEADER_COMPLETE","header_complete_count":1},
+        {"drawing_index":3,"file":"ASSEMBLY_C.dwg","drawing_key":"ASSEMBLY_C",
+         "part_key_candidate":"ASSEMBLY_C","status":"HEADER_COMPLETE","header_complete_count":1},
+    ]
+    def row(parent,num,part):
+        return {"drawing_index":parent,"item_no":num,"subrow_id":1,
+                "table_id":"T1","part_number":part,"drawing_number":"",
+                "part_name":"TEST_COMPONENT","qpa":1,"source_kind":"PRIMARY",
+                "status":"CANDIDATE"}
+    _,occ,links,checks,_,stats=build_direct_hierarchy(
+        docs,[row(1,1,"CHILD_B"),row(3,1,"CHILD_B"),row(1,2,"PART_P")])
+    assert len(occ)==3, "All direct occurrences must remain"
+    assert len(links)==2 and stats["exact_candidate_links"]==2, "Shared child DWG linking"
+    assert {e["parent_drawing_index"] for e in links}=={1,3}, "Two parents retained"
+    assert stats["unlinked_occurrences"]==1, "Unlinked part retained"
+    _,_,cycle_links,_,_,_=build_direct_hierarchy(
+        docs,[row(1,1,"CHILD_B"),row(2,1,"ASSEMBLY_A")])
+    assert len(cycle_links)==2 and all(
+        e["status"]=="CYCLE_REVIEW" for e in cycle_links), "Cycle must be flagged"
+    docs.append(dict(docs[1],drawing_index=4,file="CHILD_B_copy.dwg"))
+    _,amb,amb_links,_,_,_=build_direct_hierarchy(docs,[row(1,1,"CHILD_B")])
+    assert amb[0]["match_status"]=="AMBIGUOUS_MULTIPLE_DRAWINGS", "Ambiguous drawings"
+    assert len(amb_links)==2, "Keep both ambiguous candidates"
+    print("V0.7.1|SELFTEST|PASS|공통부품2부모|미연결|순환|중복도면후보")
+    return 0
+
+
+def csv_write(path,header,rows):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    with path.open("w",newline="",encoding="utf-8-sig") as fh:
+        w=csv.DictWriter(fh,fieldnames=header,extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+def demo():
+    texts=[
+      {"v":c,"x":100+i*8,"y":25,"h":3,"layer":"G","space":"MODEL","tag":"text"}
+      for i,c in enumerate(TARGET)
+    ]
+    texts += [
+      {"v":c,"x":200,"y":70-i*8,"h":3,"layer":"0","space":"MODEL","tag":"text"}
+      for i,c in enumerate(TARGET)
+    ]
+    texts.append({"v":"부 품 목 록","x":40,"y":90,"h":3,"layer":"G","space":"MODEL","tag":"text"})
+    # Separate deterministic table, with a nearby anchor and five matching headings.
+    texts.append({"v":"부품목록","x":110,"y":10,"h":2.5,"layer":"G","space":"MODEL","tag":"text"})
+    xs=[100,135,180,225,285]
+    for i,word in enumerate(HEADERS):
+        texts.append({"v":word,"x":xs[i],"y":25,"h":2.5,"layer":"G","space":"MODEL","tag":"text"})
+    for item_no,y in [(1,35),(2,46)]:
+        vals=[str(item_no),"테스트품명"+str(item_no),"2",
+              "PART-"+str(item_no),"DRAW-"+str(item_no)]
+        for i,val in enumerate(vals):
+            texts.append({"v":val,"x":xs[i],"y":y,"h":2.5,"layer":"G","space":"MODEL","tag":"text"})
+    return texts,{"entities":len(texts),"texts":len(texts),"g_texts":len(texts),
+                  "blocks":0,"skipped":0},[]
+
+
+def _dynamic_com_object(obj):
+    """Force late-bound IDispatch instead of stale makepy wrappers."""
+    from win32com.client import dynamic
+    raw = getattr(obj, "_oleobj_", obj)
+    return dynamic.Dispatch(raw)
+
+
+def _find_already_open(docs, filepath):
+    """Avoid opening a document twice after failed CLOSE. COM calls are retried."""
+    target = str(filepath).lower()
+    try:
+        n = int(call(lambda: docs.Count, "Documents.Count"))
+    except Exception:
+        return None
+    for i in range(n):
+        try:
+            existing = call(lambda j=i: docs.Item(j), "Documents.Item")
+            full = str(call(lambda d=existing: d.FullName, "Document.FullName")).lower()
+            if full == target:
+                return existing
+        except Exception:
+            continue
+    return None
+
+
+def resilient_open(acad, filepath, report):
+    """Rebind AutoCAD's COM application/collection if Documents.Open vanishes.
+
+    Do not retry indefinitely or silently drop drawings. Read-only processing.
+    """
+    import win32com.client
+    errors = []
+    fullpath = str(filepath)
+    for attempt in range(3):
+        report("OPEN_METHOD", "TRY"+str(attempt+1))
+        try:
+            # Refresh the COM application on the second try. Do not spawn a new
+            # AutoCAD instance when an already-running instance cannot be reached.
+            if attempt:
+                acad = call(
+                    lambda: win32com.client.GetActiveObject("AutoCAD.Application"),
+                    "Reconnect.AutoCAD"
+                )
+            app = _dynamic_com_object(acad) if attempt else acad
+            docs = call(lambda: app.Documents, "Documents")
+            opened = _find_already_open(docs, fullpath)
+            if opened is not None:
+                report("OPEN_REUSE", "FOUND")
+                return opened, False, acad
+            # When early-bound Open is missing, force a late-bound dispatch.
+            try:
+                open_method = call(lambda: docs.Open, "Documents.Open")
+            except AttributeError:
+                report("OPEN_METHOD", "E33_REBIND")
+                docs = _dynamic_com_object(docs)
+                open_method = call(lambda: docs.Open, "Dynamic.Documents.Open")
+            report("OPEN_CALL", "TRY"+str(attempt+1))
+            document = call(lambda: open_method(fullpath, True), "Open.DWG")
+            return document, True, acad
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+            if attempt == 2:
+                if isinstance(exc, AttributeError):
+                    raise RuntimeError("E33_OPEN_METHOD_UNAVAILABLE") from exc
+                raise
+            report("OPEN_RECOVERY", "RETRY")
+            time.sleep(1.0+attempt)
+    raise RuntimeError("E33_OPEN_FAILED:" + ",".join(errors))
+
+
+def resilient_scan(doc, report):
+    """Retry full scan once only if AutoCAD refuses COM during SCAN."""
+    for attempt in range(2):
+        report("SCAN", "TRY"+str(attempt+1))
+        try:
+            return collect(doc)
+        except RuntimeError as exc:
+            if "E31_COM_BUSY" not in str(exc) or attempt:
+                raise
+            time.sleep(1.4)
+    raise RuntimeError("E31_COM_BUSY:SCAN")
+
+def main():
+    OUTPUT.mkdir(exist_ok=True)
+    start_time=time.monotonic()
+    # Unique run output prevents old validation files from being read as a new run.
+    run_id=datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    global ACTIVE_OUTPUT
+    ACTIVE_OUTPUT=OUTPUT/"RUNS"/run_id
+    ACTIVE_OUTPUT.mkdir(parents=True,exist_ok=True)
+    code_path=Path(__file__).resolve()
+    source_text=code_path.read_text(encoding="utf-8-sig")
+    code_sha=hashlib.sha256(code_path.read_bytes()).hexdigest()[:12]
+    stage_markers=("OPEN_METHOD", "OPEN_CALL", "VERSION = \"0.7.1\"")
+    integrity="OK" if all(m in source_text for m in stage_markers) else "MISMATCH"
+    (ACTIVE_OUTPUT/"RUN_ID.txt").write_text(
+        "run_id="+run_id+"\nversion="+VERSION+"\nsha256_12="+code_sha+
+        "\nsource_check="+integrity+"\n",encoding="utf-8")
+    if integrity!="OK":
+        print("V0.7.1|실행검증실패|E35")
+        return 35
+    if "--selftest" in sys.argv:
+        hierarchy_selftest()
+        return diagnostic_selftest()
+    is_demo="--demo" in sys.argv
+    paths=sorted(INPUT.rglob("*.dwg"),key=lambda p:str(p).casefold()) if INPUT.is_dir() and not is_demo else []
+    if not paths and not is_demo:
+        print("V0.7.1|DWG0|문자0|찾음0|실패1|E01")
+        return 2
+    if not is_demo:
+        try:
+            import pythoncom, win32com.client
+            pythoncom.CoInitialize()
+            try:
+                acad=call(lambda:win32com.client.GetActiveObject("AutoCAD.Application"),"GetActiveObject")
+            except Exception:
+                acad=call(lambda:win32com.client.Dispatch("AutoCAD.Application"),"Dispatch")
+        except Exception as exc:
+            print("V0.7.1|DWG0|문자0|찾음0|실패1|E02")
+            (OUTPUT/"ERROR.txt").write_text(str(exc),encoding="utf-8")
+            return 3
+    details=[]; diagnostics=[]; errors=[]
+    print("V0.7.1|RUN="+run_id+"|HASH="+code_sha)
+    header_rows=[]; header_evidence=[]
+    part_rows=[]
+    baseline_rows=[]
+    baseline_v064_rows=[]
+    row_issues=[]
+    table_evidence=[]
+    lower_recovery_audit=[]
+    no_list_drawings=0
+    drawings_with_rows=0
+    scan_busy_drawings=0
+    scan_success_drawings = 0
+    scanned_texts = 0
+    drawing_index=[]
+    stages=[]
+    def stage_report(index, where, code="OK"):
+        stages.append({"index":index,"stage":where,"code":code})
+
+    files=[None] if is_demo else paths
+    for index, path in enumerate(files, 1):
+        name="DEMO.dwg" if path is None else path.name
+        stage_report(index,"START")
+        doc=None
+        opened_by_script=False
+        if is_demo:
+            drawing_key, part_key, match_rule = "DEMO", "DEMO", "EXACT_NAME_CANDIDATE"
+            relative_name = name
+        else:
+            drawing_key, part_key, match_rule = drawing_identity(path)
+            relative_name = str(path.relative_to(INPUT))
+        index_row = {"drawing_index":index, "file":relative_name,
+                     "drawing_key":drawing_key, "part_key_candidate":part_key,
+                     "match_rule":match_rule, "anchor_count":0,"header_complete_count":0,
+                     "status":"NOT_CHECKED"}
+        drawing_index.append(index_row)
+        stage = "START"
+        counts = None
+        matches = []
+        try:
+            if is_demo:
+                stage = "DEMO"
+                texts,counts,issues=demo()
+            else:
+                stage = "OPEN_METHOD"
+                def record_open(where, value):
+                    nonlocal_stage[0] = where
+                    stage_report(index,where,value)
+                nonlocal_stage = ["OPEN_METHOD"]
+                try:
+                    doc,opened_by_script,acad = resilient_open(acad,path.resolve(),record_open)
+                except Exception:
+                    stage = nonlocal_stage[0]
+                    raise
+                time.sleep(0.75)  # slightly shorter; existing COM retry remains intact
+                stage = "SCAN"
+                texts,counts,issues = resilient_scan(
+                    doc, lambda where,value: stage_report(index,where,value))
+            scan_success_drawings += 1
+            scanned_texts += counts["texts"]
+            stage = "MATCH"
+            stage_report(index,"MATCH")
+            matches=find_target(texts)
+            for m in matches:
+                details.append({"drawing":name,"drawing_index":index,
+                                "part_key_candidate":part_key,**m})
+            index_row["anchor_count"]=len(matches)
+            stage = "HEADERS"
+            stage_report(index,"HEADERS")
+            hrows,hev=find_headers(texts,matches)
+            complete=sum(hr["status"]=="COMPLETE" for hr in hrows)
+            stage="ROWS"
+            stage_report(index,"ROWS")
+            found_for_drawing=0
+            list_absent=True
+            drawn_keys=set()
+            for hrow in hrows:
+                if hrow["status"]!="COMPLETE":
+                    continue
+                extracted,issues_rows=extract_bom_rows(texts,hrow)
+                # Keep the verified v0.6.3 row output as a separate baseline.
+                base_for_header=[dict(prow,table_id="T1",subrow_id=1,
+                                       source_kind="V063_BASELINE")
+                                 for prow in extracted]
+                for prow in base_for_header:
+                    baseline_rows.append({"drawing_index":index,"drawing":name,
+                                          "anchor_index":hrow["anchor_index"],**prow})
+                expanded,split_alerts=expand_merged_part_rows(texts,hrow,extracted)
+                left,found_tables,left_alerts=find_left_continuations(
+                    texts,hrow,extracted,drawn_keys)
+                for table in found_tables:
+                    table_evidence.append({"drawing_index":index,"drawing":name,
+                                           "anchor_index":hrow["anchor_index"],**table})
+                # A continuation may itself contain a merged-name row; apply the
+                # same expansion using a shifted header geometry.
+                expanded_left=[]
+                # The left tables use a translated copy of the verified
+                # reference geometry; the verified header detector stays fixed.
+                for tid in sorted(set(row["table_id"] for row in left)):
+                    group=[row for row in left if row["table_id"]==tid]
+                    evidence=next((e for e in found_tables
+                                   if e["table_id"]==tid and
+                                   e["decision"]=="ACCEPTED"),None)
+                    if evidence is None:
+                        expanded_left.extend(group)
+                        continue
+                    shifted=dict(hrow)
+                    dx=float(evidence["left_x"])-float(hrow["품번_x"])
+                    for w in HEADERS:
+                        shifted[w+"_x"]=float(hrow[w+"_x"])+dx
+                    more,more_issues=expand_merged_part_rows(
+                        texts,shifted,group,table_id=tid)
+                    expanded_left.extend(more)
+                    split_alerts.extend(more_issues)
+                merged=expanded+expanded_left
+                # Additive pass: inspect lower portions of merged name cells.
+                recovered=[]
+                for tid in sorted(set(q["table_id"] for q in merged)):
+                    group=[q for q in merged if q["table_id"]==tid]
+                    table_header=hrow
+                    if tid!="T1":
+                        evidence=next((e for e in found_tables
+                                       if e["table_id"]==tid and
+                                       e["decision"]=="ACCEPTED"),None)
+                        if evidence is None:
+                            continue
+                        table_header=dict(hrow)
+                        dx=float(evidence["left_x"])-float(hrow["품번_x"])
+                        for w in HEADERS:
+                            table_header[w+"_x"]=float(hrow[w+"_x"])+dx
+                    additions,checks,notices=recover_merged_lower_rows(
+                        texts,table_header,group,tid)
+                    recovered.extend(additions)
+                    split_alerts.extend(notices)
+                    for atid,inum,acode,reason in checks:
+                        lower_recovery_audit.append({
+                            "drawing_index":index,"drawing":name,
+                            "anchor_index":hrow["anchor_index"],
+                            "table_id":atid,"item_no":inum,
+                            "code":acode,"detail":reason})
+                for prow in expanded+expanded_left:
+                    baseline_v064_rows.append({
+                        "drawing_index":index,"drawing":name,
+                        "anchor_index":hrow["anchor_index"],**prow})
+                merged.extend(recovered)
+                found_for_drawing+=len(merged)
+                if merged:
+                    list_absent=False
+                for prow in merged:
+                    # Multiple anchors may refer to the same physical table;
+                    # do not count identical text-coordinate rows twice.
+                    unique=(prow["table_id"],int(prow["item_no"]),
+                            round(float(prow["y"]),2),str(prow["part_number"]),
+                            int(prow["subrow_id"]))
+                    if unique in drawn_keys:
+                        continue
+                    drawn_keys.add(unique)
+                    part_rows.append({"drawing_index":index,"drawing":name,
+                                      "anchor_index":hrow["anchor_index"],**prow})
+                for code_row,detail_row in issues_rows+split_alerts+left_alerts:
+                    row_issues.append({"drawing_index":index,"drawing":name,
+                                       "code":code_row,"detail":detail_row})
+            if found_for_drawing:
+                drawings_with_rows+=1
+            elif list_absent and complete:
+                no_list_drawings+=1
+            index_row["header_complete_count"]=complete
+            index_row["status"]=("HEADER_COMPLETE" if complete else
+                                 ("ANCHOR_ONLY" if matches else "NO_ANCHOR"))
+            for hr in hrows:
+                header_rows.append({"drawing_index":index,"drawing":name,**hr})
+            for ev in hev:
+                header_evidence.append({"drawing_index":index,"drawing":name,**ev})
+            code=("E00" if complete else ("E40" if matches else
+                  ("E21" if counts["texts"] else "E20")))
+            if matches and not complete:
+                errors.append({"drawing":name,"code":"E40","stage":"HEADERS","error_type":""})
+            stage_report(index,"HEADERS",code)
+            diagnostics.append({"drawing":name,**counts,"found":len(matches),"code":code})
+            for issue in issues:
+                errors.append({"drawing":name,"code":issue})
+        except Exception as exc:
+            code=("E31" if "E31_COM_BUSY" in str(exc)
+                  else "E33" if "E33_OPEN_" in str(exc)
+                  else "E33" if stage=="OPEN_METHOD" and isinstance(exc,AttributeError)
+                  else "E34" if stage=="OPEN_CALL" and isinstance(exc,AttributeError)
+                  else "E41" if stage in ("MATCH","HEADERS","ROWS")
+                  else "E03")
+            if code=="E31" and stage=="SCAN":
+                scan_busy_drawings+=1
+                # Avoid immediate next DWG while AutoCAD is still transiently busy.
+                time.sleep(2.0)
+            index_row["status"]="ANALYSIS_ERROR" if code=="E41" else "READ_ERROR"
+            index_row["header_complete_count"]=0
+            stage_report(index,stage,code)
+            raw=counts or {"entities":0,"texts":0,"g_texts":0,
+                           "blocks":0,"skipped":0}
+            diagnostics.append({"drawing":name,**raw,"found":len(matches),"code":code})
+            # Only the missing Python attribute name is exported: never DWG paths.
+            missing_attribute=getattr(exc,"name",None)
+            missing_attribute=(str(missing_attribute)[:40]
+                               if missing_attribute else "")
+            errors.append({"drawing":name,"code":code,"stage":stage,
+                           "error_type":type(exc).__name__,
+                           "missing_attribute":missing_attribute})
+            # Generic exception message is kept locally; user need only report code/stage.
+            (ACTIVE_OUTPUT/("ERROR_%03d.txt" % index)).write_text(
+                "stage="+stage+"\ncode="+code+"\ntype="+type(exc).__name__+
+                "\nmissing_attribute="+missing_attribute+"\n",
+                encoding="utf-8")
+        finally:
+            # Close only documents opened by this run. Preserve pre-existing tabs.
+            if doc is not None and opened_by_script:
+                try:
+                    stage_report(index,"CLOSE")
+                    call(lambda:doc.Close(False),"Documents.Close")
+                    time.sleep(.55)
+                except Exception:
+                    stage_report(index,"CLOSE","E04")
+                    errors.append({"drawing":name,"code":"E04"})
+                    # Refresh the application reference before next iteration.
+                    try:
+                        import win32com.client
+                        acad=win32com.client.GetActiveObject("AutoCAD.Application")
+                    except Exception:
+                        pass
+    # Filename-based grouping is a hint, not proof of a shared part.
+    groups = defaultdict(list)
+    for row in drawing_index:
+        groups[row["part_key_candidate"]].append(row)
+    for row in drawing_index:
+        peers = groups[row["part_key_candidate"]]
+        row["candidate_group_size"] = len(peers)
+        row["group_status"] = ("REVIEW_REQUIRED" if len(peers)>1 else
+                               "SINGLE_DOCUMENT_CANDIDATE")
+    # Baseline rows and previous V0.6.5 output remain available for auditing.
+    raw_v065_rows=list(part_rows)
+    part_rows,suppressed_rows,uncertain_rows,dedupe_audit=(
+        _near_duplicate_recoveries(raw_v065_rows))
+    lower_recovery_audit.extend(dedupe_audit)
+    bom_fields=["drawing_index","drawing","anchor_index","item_no","part_name",
+                "qpa","part_number","drawing_number","y","status",
+                "table_id","subrow_id","source_kind"]
+    csv_write(ACTIVE_OUTPUT/"BOM_ROWS_BASELINE_V063.csv",bom_fields,baseline_rows)
+    csv_write(ACTIVE_OUTPUT/"BOM_ROWS_BASELINE_V064.csv",bom_fields,baseline_v064_rows)
+    csv_write(ACTIVE_OUTPUT/"BOM_ROWS_RAW_V065.csv",bom_fields,raw_v065_rows)
+    csv_write(ACTIVE_OUTPUT/"BOM_ROWS_CANDIDATES.csv",bom_fields,part_rows)
+    csv_write(ACTIVE_OUTPUT/"LOWER_RECOVERY_FILTERED.csv",
+              bom_fields+["review_reason"],suppressed_rows)
+    csv_write(ACTIVE_OUTPUT/"LOWER_RECOVERY_REVIEW.csv",
+              bom_fields+["review_reason"],uncertain_rows)
+    csv_write(ACTIVE_OUTPUT/"LOWER_RECOVERY_AUDIT.csv",
+              ["drawing_index","drawing","anchor_index","table_id",
+               "item_no","code","detail"],lower_recovery_audit)
+    csv_write(ACTIVE_OUTPUT/"TABLE_CANDIDATES.csv",
+              ["drawing_index","drawing","anchor_index","table_id","left_x",
+               "start_item","candidate_count","decision"],table_evidence)
+    csv_write(ACTIVE_OUTPUT/"ROW_VALIDATION.csv",
+              ["drawing_index","drawing","code","detail"],row_issues)
+    csv_write(ACTIVE_OUTPUT/"DRAWING_INDEX.csv",
+              ["drawing_index","file","drawing_key","part_key_candidate",
+               "match_rule","candidate_group_size","group_status",
+               "anchor_count","header_complete_count","status"],drawing_index)
+    csv_write(ACTIVE_OUTPUT/"HEADER_RESULTS.csv",
+              ["drawing_index","drawing","anchor_index","space","anchor_x","anchor_y",
+               "available_labels","status"]+
+              [x for w in HEADERS for x in (w+"_x",w+"_y",w+"_pieces")],header_rows)
+    csv_write(ACTIVE_OUTPUT/"HEADER_CANDIDATES.csv",
+              ["drawing_index","drawing","anchor_index","label","x","y","pieces"],
+              header_evidence)
+    csv_write(ACTIVE_OUTPUT/"ANCHOR_RESULTS.csv",
+              ["drawing","drawing_index","part_key_candidate",
+               "space","layer","x","y","mode","objects","text"],details)
+    csv_write(ACTIVE_OUTPUT/"DIAGNOSTICS.csv",
+              ["drawing","entities","texts","g_texts","blocks","skipped","found","code"],diagnostics)
+    csv_write(ACTIVE_OUTPUT/"VALIDATION.csv",["drawing","code","stage","error_type","missing_attribute"],errors)
+    csv_write(ACTIVE_OUTPUT/"STAGES.csv",["index","stage","code"],stages)
+    # Hierarchy matching uses ONLY the already-extracted V0.6.6 rows.
+    # No extra AutoCAD calls, no modification of BOM_ROWS_CANDIDATES.csv.
+    dwg_nodes,occurrences,relation_links,relation_checks,dot_graph,relation_stats=(
+        build_direct_hierarchy(drawing_index,part_rows))
+    csv_write(ACTIVE_OUTPUT/"DRAWING_NODES.csv",
+              ["drawing_index","drawing","drawing_key","part_key_candidate",
+               "status","header_complete_count"],dwg_nodes)
+    csv_write(ACTIVE_OUTPUT/"DIRECT_BOM_OCCURRENCES.csv",
+              ["occurrence_id","parent_drawing_index","parent_drawing",
+               "parent_part_candidate","item_no","subrow_id","table_id",
+               "child_part_number","child_drawing_number","child_name","qpa",
+               "source_kind","source_row_status","match_status",
+               "linked_drawing_count"],occurrences)
+    csv_write(ACTIVE_OUTPUT/"DIRECT_DRAWING_LINKS.csv",
+              ["occurrence_id","parent_drawing_index","parent_drawing",
+               "child_drawing_index","child_drawing","item_no","table_id",
+               "subrow_id","child_part_number","child_drawing_number","qpa",
+               "evidence","status"],relation_links)
+    csv_write(ACTIVE_OUTPUT/"RELATION_VALIDATION.csv",
+              ["occurrence_id","parent_drawing","code","candidate_count"],
+              relation_checks)
+    (ACTIVE_OUTPUT/"DIRECT_GRAPH.dot").write_text(
+        dot_graph,encoding="utf-8")
+    (ACTIVE_OUTPUT/"RELATION_SUMMARY.json").write_text(
+        json.dumps(relation_stats,ensure_ascii=False,indent=2),encoding="utf-8")
+    # Supplementary matching diagnostics. Exact graph remains unchanged.
+    id_nodes,id_fields,near_matches,id_summary=diagnose_drawing_ids(
+        drawing_index,part_rows,occurrences)
+    csv_write(ACTIVE_OUTPUT/"MATCH_DRAWING_IDENTIFIERS.csv",
+              ["drawing_index","drawing","stem","stem_normalized",
+               "part_key_normalized","status"],id_nodes)
+    csv_write(ACTIVE_OUTPUT/"MATCH_FIELD_DIAGNOSTICS.csv",
+              ["occurrence_id","field","result","candidate_count"],id_fields)
+    csv_write(ACTIVE_OUTPUT/"MATCH_REVIEW_CANDIDATES.csv",
+              ["occurrence_id","parent_drawing_index","parent_drawing",
+               "child_drawing_index","child_drawing","item_no","table_id",
+               "source_field","source_identifier","match_rule","status",
+               "matching_priority"],near_matches)
+    (ACTIVE_OUTPUT/"MATCH_DIAGNOSTIC_SUMMARY.json").write_text(
+        json.dumps(id_summary,ensure_ascii=False,indent=2),encoding="utf-8")
+    total_text=scanned_texts
+    found=len(details)
+    fail=sum(x["code"]!="E00" for x in diagnostics)
+    success_drawings=sum(x["found"]>0 for x in diagnostics)
+    anchor_drawings = sum(row["anchor_count"] > 0 for row in drawing_index)
+    read_error_drawings = sum(row["status"]=="READ_ERROR" for row in drawing_index)
+    analysis_error_drawings = sum(row["status"]=="ANALYSIS_ERROR" for row in drawing_index)
+    complete_header_drawings=sum(row["header_complete_count"]>0 for row in drawing_index)
+    complete_header_sets=sum(row["status"]=="COMPLETE" for row in header_rows)
+    drawings_with_rows=len(set(row["drawing_index"] for row in part_rows))
+    review_rows=sum(row["status"]!="CANDIDATE" for row in part_rows)
+    no_anchor_drawings = sum(row["status"]=="NO_ANCHOR" for row in drawing_index)
+    group_candidates = len(groups)
+    multi_drawing_candidate_groups = sum(len(members)>1 for members in groups.values())
+    summary={"version":VERSION,"run_id":run_id,"source_hash":code_sha,"elapsed_seconds":round(time.monotonic()-start_time,2),"dwg_files":len(files),"texts":total_text,
+             "drawings_with_anchor":anchor_drawings,"anchor_occurrences":found,
+             "read_error_drawings":read_error_drawings,
+             "analysis_error_drawings":analysis_error_drawings,
+             "scan_success_drawings":scan_success_drawings,
+             "complete_header_drawings":complete_header_drawings,
+             "complete_header_sets":complete_header_sets,
+             "drawings_with_rows":drawings_with_rows,
+             "no_list_drawings":no_list_drawings,
+             "scan_busy_drawings":scan_busy_drawings,
+             "part_row_candidates":len(part_rows),
+             "direct_links_exact_candidate":relation_stats["exact_candidate_links"],
+             "match_review_candidates":id_summary["near_candidate_occurrences"],
+             "direct_links_review":relation_stats["review_link_candidates"],
+             "raw_v065_candidates":len(raw_v065_rows),
+             "filtered_duplicate_recoveries":len(suppressed_rows),
+             "uncertain_recoveries":len(uncertain_rows),
+             "baseline_v063_rows":len(baseline_rows),
+             "baseline_v064_rows":len(baseline_v064_rows),
+             "additional_candidate_rows":len(part_rows)-len(baseline_rows),
+             "merged_lower_recovery_candidates":sum(
+                 r.get("source_kind")=="MERGED_LOWER_RECOVERY" for r in part_rows),
+             "left_table_search_attempts":len(table_evidence),
+             "review_rows":review_rows,
+             "row_issues":len(row_issues),
+             "no_anchor_drawings":no_anchor_drawings,
+             "candidate_part_groups":group_candidates,
+             "multi_drawing_candidate_groups":multi_drawing_candidate_groups,
+             "caution":"File-to-part grouping is provisional; different drawings may represent one part, and distinct parts may have similar names."}
+    (ACTIVE_OUTPUT/"SUMMARY.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+    code="E03" if any(x["code"] in ("E03","E31") for x in diagnostics) else ("E21" if not found else "E00")
+    code=("E31" if any(x["code"]=="E31" for x in diagnostics)
+          else "E33" if any(x["code"]=="E33" for x in diagnostics)
+          else "E34" if any(x["code"]=="E34" for x in diagnostics)
+          else "E03" if read_error_drawings
+          else "E41" if analysis_error_drawings
+          else "E40" if complete_header_drawings<anchor_drawings
+          else "E21" if anchor_drawings<len(files)
+          else "E00")
+    if code=="E00" and no_list_drawings:
+        code="N01"
+    elif code=="E00" and (review_rows or row_issues):
+        code="E52"
+    print("V0.7.1|DWG%d|읽음%d|목록도면%d|행%d|직속연결후보%d|파일명검토후보%d|SCAN바쁨%d|%s" %
+          (len(files),scan_success_drawings,drawings_with_rows,
+           len(part_rows),relation_stats["exact_candidate_links"],
+           id_summary["near_candidate_occurrences"],scan_busy_drawings,code))
+    return 0
+
+if __name__=="__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        OUTPUT.mkdir(exist_ok=True)
+        (OUTPUT/"FATAL_ERROR.txt").write_text(traceback.format_exc(),encoding="utf-8")
+        print("V0.7.1|DWG0|문자0|찾음0|실패1|E99")
+        sys.exit(99)
