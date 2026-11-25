@@ -1,0 +1,75 @@
+CAD-PART V0.7.0 | 2026-11-25 | 배포번호 008
+
+[중요: 원본 품목 추출은 V0.6.6 그대로]
+- 현장 기준: 20 DWG 모두 읽음 / 실제 목록 있는 도면 5개
+- 실제 품목 133개, V0.6.6 추출 후보 136개
+- 이 버전은 V0.6.6 전체 소스를 기준으로 직속 DWG 관계만 추가
+- find_target, find_headers, extract_bom_rows, 병합 하단 복원, 중복 필터 등의 함수는 그대로 유지
+- 기존 BOM_ROWS_CANDIDATES.csv는 종전 형식/내용으로 생성
+- 최상위 조립체를 임의로 지정하지 않음. Level도 이번에 확정하지 않음.
+
+[새로운 직속 부모-자식 연결 방식]
+1. 각 DWG의 대표 품번 후보: 파일명을 정규화한 drawing_key와 시트 접미어를 제거한 part_key_candidate.
+2. 상위 DWG의 부품목록에서 추출한 모든 행은 그 도면의 '직속 구성품 occurrence'로 기록.
+3. 각 구성품 행의 '부품번호'와 '도면번호'를 다른 DWG의 대표 품번 후보와 정확히 비교.
+4. 동일한 명칭이 다른 도면에서 발견됐다는 이유만으로 새로운 부모 관계를 생성하지 않음.
+5. 정확히 하나의 하위 DWG가 연결되면 EXACT_CANDIDATE. 엔지니어링 근거 확인 전 확정 아님.
+6. 여러 다른 도면이 연결되거나 자기참조, 품번/도면번호가 서로 충돌하면 검토로 보냄.
+7. 다른 도면이 없으면 NO_CHILD_DWG_IN_INPUT. 그 부품이 최하위라고 확정하지 않음.
+8. 한 부품이 서로 다른 두 상위 DWG의 부품목록에 각각 있다면 둘 다 직접 사용 관계로 기록 (정상적인 다중 부모 허용).
+9. 고유 연결 후보끼리 순환이 생기면 CYCLE_REVIEW로 기록.
+10. DWG를 열 때의 순서와 관계없이 전체 인덱스를 만든 후 Python 메모리에서 매칭.
+
+[속도 변경]
+- 추출 후 연결은 메모리 인덱스로 계산하며 CAD COM 추가 스캔 없음.
+- 열기 후 고정 대기 0.8 -> 0.75초, 닫기 후 0.7 -> 0.55초 소폭 조정.
+- COM 재시도/안정화 방식은 유지. 이 변경이 실제 속도를 높일지는 현장 실측으로 확인.
+- SUMMARY.json의 elapsed_seconds로 이전 V0.6.6과 비교 가능.
+
+[실행]
+1. 기존 cadpart_v03.py와 CAD_RESULT 폴더의 이전 실행 자료 백업.
+2. GitHub 01_cadpart_v03_전체소스.txt를 회사 승인된 절차로 준비.
+3. 파일명은 기존과 동일하게 cadpart_v03.py.
+4. CAD_INPUT에 동일한 20개 DWG 복사본 유지.
+5. AutoCAD 2019 실행, 다른 팝업/작업 명령을 종료.
+6. 실행은 한 줄: python cadpart_v03.py
+
+[새로 만들어지는 결과 파일]
+CAD_RESULT/RUNS/최신실행번호/
+- BOM_ROWS_CANDIDATES.csv : V0.6.6 품목 추출 후보 (기준 136개)
+- DRAWING_NODES.csv : 20개 DWG별 도면 식별정보/상태
+- DIRECT_BOM_OCCURRENCES.csv : 상위 DWG 부품목록에 실제 기록된 직속 하위품목 (연결 DWG 없어도 보존)
+- DIRECT_DRAWING_LINKS.csv : 직속 하위품목과 다른 DWG 일치에 따른 연결 후보
+- RELATION_VALIDATION.csv : 복수 매칭/자기참조/순환/미연결 등의 판정
+- DIRECT_GRAPH.dot : Graphviz DOT 형식으로 그린 DWG 간 연결 후보 그래프
+- RELATION_SUMMARY.json : 직속 구성품, 연결 후보, 보류 항목 통계
+- SUMMARY.json : 기존 처리시간 및 추가 연결 통계
+
+[연결 파일의 필드 및 의미]
+DIRECT_DRAWING_LINKS.csv:
+parent_drawing=부품목록이 있는 부모 DWG
+child_drawing=그 부품행의 부품번호/도면번호와 이름이 일치한 다른 DWG
+evidence=PART_NUMBER_EXACT / DRAWING_NUMBER_EXACT / 양쪽 일치
+status=EXACT_CANDIDATE(확인 전 관계 후보), AMBIGUOUS_*, CYCLE_REVIEW 등
+NO_CHILD_DWG_IN_INPUT은 직속 구성품이지만 상대 DWG가 없기 때문에
+DIRECT_BOM_OCCURRENCES.csv에만 남음.
+
+[검증해야 할 것]
+1. DWG20, 읽음20, 목록도면5, 행136 유지 여부
+2. DIRECT_DRAWING_LINKS.csv의 연결 건수와 실제 부모->자식 도면 관계
+3. RELATION_VALIDATION.csv에서 잘못된 다중/순환/자기참조 발견 여부
+4. 어떤 도면이 최상위인지 이번 단계에서 임의 판정하지 않았는지
+5. SUMMARY.json의 elapsed_seconds, 종전보다 증가/감소
+
+[모바일 피드백]
+- 마지막 요약 출력 한 줄
+- BOM_ROWS_CANDIDATES.csv 데이터 136개 유지 여부
+- DIRECT_DRAWING_LINKS.csv에서 EXACT_CANDIDATE 건수
+- 잘못 연결된 직속 DWG 후보 건수
+- 실제 연결돼야 하는데 빠진 건수
+- 실행시간(초). 실제 부품번호/도면파일명 전달 불필요.
+
+[보안]
+실제 회사 도면, 품번, 사내 경로 및 추출 CSV/그래프 원문을
+공개 GitHub에 업로드하면 안 됩니다. 테스트용 가상 품번만 공개 가능합니다.
+이 버전의 실제 AutoCAD 2019 환경 실행은 아직 현장 검증 전입니다.
