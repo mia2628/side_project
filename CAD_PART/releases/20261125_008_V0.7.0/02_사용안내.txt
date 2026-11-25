@@ -34,6 +34,12 @@ CAD-PART V0.7.0 | 2026-11-25 | 배포번호 008
 5. AutoCAD 2019 실행, 다른 팝업/작업 명령을 종료.
 6. 실행은 한 줄: python cadpart_v03.py
 
+[가상 데이터만으로 관계 알고리즘 단독 시험 — 선택 사항]
+python cadpart_v03.py --selftest
+정상 출력: V0.7.0|SELFTEST|PASS|공통부품2부모|미연결|순환|중복도면후보
+이 테스트는 AutoCAD가 필요 없으며 실제 도면/품번을 사용하지 않습니다.
+단, 구문 검증 및 COM 관련 실제 현장 테스트를 대체하지는 않습니다.
+
 [새로 만들어지는 결과 파일]
 CAD_RESULT/RUNS/최신실행번호/
 - BOM_ROWS_CANDIDATES.csv : V0.6.6 품목 추출 후보 (기준 136개)
