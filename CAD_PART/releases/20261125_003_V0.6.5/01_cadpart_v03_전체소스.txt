@@ -476,7 +476,7 @@ def _field_text(tokens):
 
 def _lines_inside(token):
     # One AutoCAD MText entity may contain multiple lines with distinct part IDs.
-    value=str(token.get("raw",token.get("v",""))).replace("\\P","\n")
+    value=str(token.get("v","")).replace("\\P","\n")
     return [p.strip() for p in re.split(r"[\r\n]+",value) if p.strip()]
 
 
