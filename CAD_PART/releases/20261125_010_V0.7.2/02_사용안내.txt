@@ -1,0 +1,66 @@
+CAD-PART V0.7.2 | 2026-11-25 | 배포번호 010
+
+[이전 22개 DWG 실측]
+- DWG 22개 모두 읽기 성공
+- V0.7.1 품목 추출 156개 후보
+- 기존 엄격한 파일명 매칭은 0건
+- 새로 발견한 파일명 검토 후보 17건
+- 실제 상하위 도면이 검토 후보에 포함된 것을 사용자 확인
+
+[지켜야 할 기존 기능]
+V0.6.6에서 성공한 추출 알고리즘과 V0.7.1의 AutoCAD COM 처리는 변경하지 않습니다.
+기존 BOM_ROWS_CANDIDATES.csv, DIRECT_BOM_OCCURRENCES.csv 및
+DIRECT_DRAWING_LINKS.csv(엄격 매칭)도 기존 방식 그대로 생성합니다.
+최상위 조립체, 임의 Level을 정하지 않으며 순환은 검토합니다.
+
+[새로 추가한 연결 후보 엔진]
+- 파일명과 품목 번호가 대소문자/공백만 다름: 기존 STRICT 연결
+- 구분기호만 다른 품번이 정확히 하나의 다른 DWG와 대응:
+  NORMALIZED_EXACT_CANDIDATE (자동 확정이 아니라 더 강한 검토 후보)
+- 품번 전체가 긴 DWG 파일명 내부에 있음(예: ABC-12345 vs ABC-12345_REV-A):
+  FILENAME_EMBEDDED_REVIEW. 그래프에 표시되나 자동 확정하지 않음.
+- 복수 DWG 후보, 부품번호와 도면번호 간 충돌, 기존 엄격 매칭과 충돌:
+  AMBIGUOUS_REVIEW
+- 후보 사이 순환: CYCLE_REVIEW
+- 동일한 품목이 상이한 부모 DWG의 실제 부품목록에 각각 등장한 경우는
+  별도의 직속 사용 관계로 유지. 전체 도면의 품번 동일성만으로 부모 관계를 만들지 않음.
+
+[추가 출력]
+CAD_RESULT/RUNS/최신실행번호/
+DIRECT_LINK_CANDIDATES_V072.csv
+  - 원래 17개 파일명 후보에서 대상별 근거를 합쳐 검토 상태 부여
+  - 열: parent_drawing, child_drawing, source_fields, match_rules, status
+DIRECT_GRAPH_CANDIDATES_V072.dot
+  - 기존 엄격 링크+추가 후보 그래프
+  - 실선은 엄격/정규화 후보, 점선은 파일명 포함 검토 후보
+DIRECT_LINK_CANDIDATE_SUMMARY.json
+  - normalized_exact_candidate_edges / filename_embedded_review_edges
+  - ambiguous_review_edges / cycle_review_edges
+기존 DIRECT_DRAWING_LINKS.csv는 엄격 연결만 유지하므로 0건일 수도 있습니다.
+
+[실행]
+1. 기존 cadpart_v03.py와 CAD_RESULT 결과를 백업.
+2. 01_cadpart_v03_전체소스.txt를 회사 승인 절차로 준비.
+3. CAD_INPUT에 기존 20개와 실제 상하위 도면 2개, 총 22개 유지.
+4. AutoCAD 2019 실행, 다른 팝업/작업 명령은 종료.
+5. 명령 하나:
+python cadpart_v03.py
+
+[가상 데이터 관계 엔진 자체 검사 — 선택]
+python cadpart_v03.py --selftest
+기존 그래프 검증 + 파일명 검토 + V0.7.2 분류 검사 3개가 PASS여야 합니다.
+
+[다음 결과 보고 — 실제 품번 필요 없음]
+1. 마지막 실행 요약 한 줄
+2. BOM_ROWS_CANDIDATES.csv 데이터 행 수 (지난번 156개)
+3. DIRECT_LINK_CANDIDATE_SUMMARY.json의
+   normalized_exact_candidate_edges / filename_embedded_review_edges /
+   ambiguous_review_edges
+4. DIRECT_LINK_CANDIDATES_V072.csv에서 실제 연결관계의 올바른 방향 및
+   부모/자식 DWG가 몇 쌍 잡혔는지
+5. 잘못 연결된 후보 수와 누락된 연결 수
+
+[보안/한계]
+파일명 내부 포함은 실제 관계의 검토 후보일 뿐 확정 근거가 아닙니다.
+회사 실제 도면, 품번, 사내 경로, 추출 결과 CSV 또는 그래프를 공개 GitHub에 올리지 마세요.
+실도면에서 매칭 정확도는 사용자가 현장 검증해야 합니다.
