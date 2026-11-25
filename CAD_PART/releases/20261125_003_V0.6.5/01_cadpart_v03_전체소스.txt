@@ -771,8 +771,8 @@ def recover_merged_lower_rows(texts,header,source_rows,table_id):
         for t in all_cells:
             fragments=_part_fragments(t)
             for line_idx,part in enumerate(fragments):
-                if not part or item_number(part) is not None or
-                   part in HEADERS:
+                if (not part or item_number(part) is not None or
+                        part in HEADERS):
                     continue
                 # MText line number preserves order, not fabricated physical Y.
                 candidate_entries.append((float(t["y"]),line_idx,part,t))
@@ -972,6 +972,7 @@ def main():
     header_rows=[]; header_evidence=[]
     part_rows=[]
     baseline_rows=[]
+    baseline_v064_rows=[]
     row_issues=[]
     table_evidence=[]
     lower_recovery_audit=[]
@@ -1106,6 +1107,10 @@ def main():
                             "anchor_index":hrow["anchor_index"],
                             "table_id":atid,"item_no":inum,
                             "code":acode,"detail":reason})
+                for prow in expanded+expanded_left:
+                    baseline_v064_rows.append({
+                        "drawing_index":index,"drawing":name,
+                        "anchor_index":hrow["anchor_index"],**prow})
                 merged.extend(recovered)
                 found_for_drawing+=len(merged)
                 if merged:
@@ -1201,6 +1206,7 @@ def main():
                 "qpa","part_number","drawing_number","y","status",
                 "table_id","subrow_id","source_kind"]
     csv_write(ACTIVE_OUTPUT/"BOM_ROWS_BASELINE_V063.csv",bom_fields,baseline_rows)
+    csv_write(ACTIVE_OUTPUT/"BOM_ROWS_BASELINE_V064.csv",bom_fields,baseline_v064_rows)
     csv_write(ACTIVE_OUTPUT/"BOM_ROWS_CANDIDATES.csv",bom_fields,part_rows)
     csv_write(ACTIVE_OUTPUT/"LOWER_RECOVERY_AUDIT.csv",
               ["drawing_index","drawing","anchor_index","table_id",
@@ -1254,6 +1260,7 @@ def main():
              "scan_busy_drawings":scan_busy_drawings,
              "part_row_candidates":len(part_rows),
              "baseline_v063_rows":len(baseline_rows),
+             "baseline_v064_rows":len(baseline_v064_rows),
              "additional_candidate_rows":len(part_rows)-len(baseline_rows),
              "merged_lower_recovery_candidates":sum(
                  r.get("source_kind")=="MERGED_LOWER_RECOVERY" for r in part_rows),
