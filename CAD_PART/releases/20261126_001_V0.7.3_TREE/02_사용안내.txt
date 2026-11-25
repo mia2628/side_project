@@ -1,0 +1,71 @@
+CAD-PART HIERARCHY V0.7.3 | 2026-11-26 | 배포 001
+
+[목적]
+V0.7.2에서 생성한 22개 DWG와 156개 부품 후보를 '계층형 BOM 엑셀'로 펼칩니다.
+하위품목은 상위품목보다 엑셀에서 오른쪽 한 열에 나열합니다.
+A열(LEVEL_00)=도면 시작 후보, B열(LEVEL_01)=직속 구성품,
+C열(LEVEL_02)=해당 품목에 연결된 자식 DWG의 직속 구성품... 식으로 계속됩니다.
+
+[중요: 기존 프로그램 완전 보존]
+- V0.6.6/V0.7.2에서 정상 작동 중인 cadpart_v03.py는 수정하지 않습니다.
+- AutoCAD와 DWG 재스캔이 전혀 필요 없습니다.
+- 신규 독립 실행 파일 cadpart_hierarchy_v01.py만 준비해 실행합니다.
+- 외부 라이브러리/인터넷이 필요하지 않으며 Python 표준 라이브러리만 사용합니다.
+
+[입력]
+CAD_RESULT/RUNS/날짜시간 폴더에 있는 다음 CSV 3개를 자동 선택합니다.
+1. DRAWING_NODES.csv
+2. DIRECT_BOM_OCCURRENCES.csv
+3. DIRECT_LINK_CANDIDATES_V072.csv
+가능하다면 DIRECT_DRAWING_LINKS.csv의 기존 엄격 일치도 별도 병합합니다.
+필수 CSV 3개가 모두 있는 최신 RUNS 폴더만 선택하며 다른 폴더는 건드리지 않습니다.
+
+[배치 위치]
+D:\CAD_PART\
+  cadpart_v03.py                        (기존 유지)
+  cadpart_hierarchy_v01.py              (새 독립 프로그램)
+  CAD_RESULT\RUNS\기존실행번호\
+    DRAWING_NODES.csv
+    DIRECT_BOM_OCCURRENCES.csv
+    DIRECT_LINK_CANDIDATES_V072.csv
+
+[실행 방법]
+1. GitHub 01_cadpart_hierarchy_v01_전체소스.txt 파일 확보.
+2. 회사가 승인한 반입/실행 절차로 cadpart_hierarchy_v01.py 준비.
+3. 실행 폴더에서 아래 한 줄을 입력:
+python cadpart_hierarchy_v01.py
+
+[선택: 가상 사례 테스트]
+python cadpart_hierarchy_v01.py --selftest
+성공 시: V0.7.3|SELFTEST|PASS|PARENT_CHILD_GRANDCHILD
+
+[결과 — 기존 V0.7.2 실행 폴더에 추가 저장]
+- BOM_HIERARCHY_V073.xlsx : 계층형 엑셀 3개 시트
+  * 계층형_BOM: LEVEL_00..LEVEL_09을 차례로 한 칸씩 들여쓰기
+    + 부품번호, 도면번호, 품명, 수량, 부모DWG, 연결DWG, 연결상태,
+      일치근거, 원본 occurrence_id, 표ID, 표순번, 검토내용
+  * 검증요약: 도면 수, 직속품목 후보 수, 연결 수, 순환 경고 등
+  * 연결근거: 연결 후보별 원본 occurrence-ID / 부모 / 자식 / 상태
+- BOM_HIERARCHY_V073.csv : 엑셀과 동일한 원본 계층 데이터
+- HIERARCHY_SUMMARY_V073.json : 요약 통계
+
+[안전한 표현]
+- 최상위 조립체를 임의로 지정하지 않습니다.
+  부모 연결을 찾지 못한 도면은 [도면 시작 후보]로 표시합니다.
+- 연결 상태가 FILENAME_EMBEDDED_REVIEW 또는 AMBIGUOUS_REVIEW 등이라도
+  연결 후보로 엑셀에 나열하지만, 현장 확인 전 확정된 관계가 아닙니다.
+- 동일한 자식이 두 상위 도면에 연결되면 두 상위의 하위 계층에 각각 나타납니다.
+- 순환 관계는 [CYCLE REVIEW]로 중단합니다.
+- 도면이 추가되어도 Excel 계층 행이 156개보다 많아질 수 있습니다.
+  동일 부품이 여러 부모 경로에 나타나는 것은 정상인 경우도 있습니다.
+
+[다음 확인]
+1. 마지막 출력 V0.7.3|DWG..|직속품목..|연결후보..|계층행..|엑셀OK
+2. 엑셀 계층형_BOM 시트에서 실제 맞는 부모/자식 관계가 오른쪽 한 열씩 펼쳐졌는지
+3. 실제 올바른 연결 9쌍이 적절한 깊이에서 나열됐는지
+4. 중복·누락·순환 관련 이상 여부
+5. 필요하면 간단히 '맞음/몇 건 틀림' 숫자만 전달
+
+[보안]
+사내 도면, 품번, 실제 결과 파일 또는 경로를 공개 GitHub에 업로드하지 마세요.
+이 버전의 엑셀 레이아웃은 사용자 현장 실도면에서 아직 검증되지 않았습니다.
