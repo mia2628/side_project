@@ -475,14 +475,14 @@ def _field_text(tokens):
 
 def _lines_inside(token):
     # One AutoCAD MText entity may contain multiple lines with distinct part IDs.
-    value=str(token.get("v","")).replace("\\P","\\n")
-    return [p.strip() for p in re.split(r"[\\r\\n]+",value) if p.strip()]
+    value=str(token.get("v","")).replace("\\P","\n")
+    return [p.strip() for p in re.split(r"[\r\n]+",value) if p.strip()]
 
 
 def _row_line_groups(texts, row_y, next_y, low_y, bounds, space, typical_h):
     """Return all relevant text entities in the region of an ordinal cell."""
     lower = max(low_y, row_y-1.8*typical_h)
-    upper = (row_y+next_y)/2 if next_y is not None else row_y+12*typical_h
+    upper = (row_y+next_y)/2 if next_y is not None else row_y+6*typical_h
     return [[t for t in texts
              if t["space"]==space and
              bounds[i] <= t["x"] < bounds[i+1] and
