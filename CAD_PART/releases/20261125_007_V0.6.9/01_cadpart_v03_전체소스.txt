@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""CAD-PART V0.6.9 — '부품목록' 기준 문자 탐색 전용 진단판.
+"""CAD-PART V0.6.9 — '부품목록' V0.6.6 기준의 추출 정밀 검증판.
 AutoCAD 2019 + pywin32 / Windows / 오프라인.
 실행: python cadpart_v03.py
-도면을 수정하거나 저장하지 않으며, 구성품 추출 후보를 CSV로 저장합니다.
+도면을 수정하거나 저장하지 않으며, 부품목록 후보와 별도 정밀검토 결과를 CSV로 저장합니다.
 """
 from __future__ import annotations
 import csv
@@ -823,9 +823,94 @@ def recover_merged_lower_rows(texts,header,source_rows,table_id):
 
 
 
-# V0.6.9: standalone precision audit ONLY. The V0.6.5 extraction code
+# V0.6.6: Post-filter ONLY the additive V0.6.5 lower-row recovery.
+# The previously verified anchored/left-table candidate pipeline is unchanged.
+def _identifiers_from_existing(cell):
+    """Exact components of a composite part-number cell, not substrings."""
+    if not cell:
+        return set()
+    text_value=str(cell).replace("\\P","\n")
+    return {_part_norm(p) for p in re.split(r"[\r\n,;]+",text_value)
+            if _part_norm(p)}
+
+
+def _near_duplicate_recoveries(rows):
+    """Keep baseline intact; suppress only evidenced overlap of lower candidates.
+
+    A near-adjacent ordinal is considered only when identical part identifiers
+    have been observed in that ordinal's existing part-number field.
+    Ambiguous ownership is retained in a separate review file instead of
+    silently being counted as a confirmed new item.
+    """
+    kept=[]
+    suppressed=[]
+    uncertain=[]
+    audit=[]
+    base=[r for r in rows if r.get("source_kind")!="MERGED_LOWER_RECOVERY"]
+    seen={}
+    bygroup=defaultdict(list)
+    for r in base:
+        bygroup[(r["drawing_index"],r["anchor_index"],r["table_id"])].append(r)
+    for r in rows:
+        if r.get("source_kind")!="MERGED_LOWER_RECOVERY":
+            kept.append(r)
+            continue
+        key=_part_norm(r.get("part_number"))
+        group=(r["drawing_index"],r["anchor_index"],r["table_id"])
+        y=float(r["y"])
+        ordinal=int(r["item_no"])
+        others=bygroup.get(group,[])
+        positions=sorted(set(float(p["y"]) for p in others))
+        gaps=[b-a for a,b in zip(positions,positions[1:]) if b>a]
+        pitch=sorted(gaps)[len(gaps)//2] if gaps else 4.0
+        # Keep a strict tolerance smaller than the average row separation.
+        proximity=max(0.65, min(pitch*.40, 4.0))
+        reason=""
+        for existing in others:
+            old=_part_norm(existing.get("part_number"))
+            if not old:
+                continue
+            pieces=_identifiers_from_existing(existing.get("part_number"))
+            if key==old or key in pieces:
+                # Exact same part and ordinal -> duplicate; nearby different
+                # ordinal with same part and row coordinate -> overlap.
+                if ordinal==int(existing["item_no"]):
+                    reason="M41_ALREADY_IN_SAME_ORDINAL"
+                    break
+                if abs(y-float(existing["y"]))<=proximity:
+                    reason="M42_OVERLAP_NEIGHBOR_ORDINAL"
+                    break
+        if not reason:
+            compound=(group,ordinal,key)
+            if compound in seen:
+                reason="M43_DUPLICATE_RECOVERY_ID"
+            else:
+                seen[compound]=y
+        if reason:
+            suppressed.append(dict(r,review_reason=reason))
+            audit.append({"drawing_index":r["drawing_index"],"drawing":r["drawing"],
+                          "anchor_index":r["anchor_index"],"table_id":r["table_id"],
+                          "item_no":ordinal,"code":reason,"detail":"FILTERED_RECOVERY"})
+            continue
+        # Strong warning for a candidate extremely close to another ordinal,
+        # but with no duplicate identity evidence. Preserve it for review.
+        nearby_ordinal=any(int(p["item_no"])!=ordinal
+                            and abs(y-float(p["y"])) <= proximity
+                            for p in others)
+        if nearby_ordinal:
+            uncertain.append(dict(r,review_reason="M44_NEIGHBOR_ROW_OWNERSHIP"))
+            audit.append({"drawing_index":r["drawing_index"],"drawing":r["drawing"],
+                          "anchor_index":r["anchor_index"],"table_id":r["table_id"],
+                          "item_no":ordinal,"code":"M44","detail":"REVIEW_OWNERSHIP"})
+            # Do not count ambiguous records as confirmed but never erase them.
+            continue
+        kept.append(r)
+    return kept,suppressed,uncertain,audit
+
+
+# V0.6.9: standalone precision audit ONLY. The V0.6.6 extraction code
 # above (including multiline/lower recovery) is intentionally unchanged.
-# The default BOM_ROWS_CANDIDATES.csv remains the exact V0.6.5 result.
+# The default BOM_ROWS_CANDIDATES.csv remains the exact V0.6.6 result.
 def _audit_norm(value):
     return re.sub(r"\s+", "", str(value or "")).upper()
 
@@ -1276,18 +1361,28 @@ def main():
         row["candidate_group_size"] = len(peers)
         row["group_status"] = ("REVIEW_REQUIRED" if len(peers)>1 else
                                "SINGLE_DOCUMENT_CANDIDATE")
+    # Baseline rows and previous V0.6.5 output remain available for auditing.
+    raw_v065_rows=list(part_rows)
+    part_rows,suppressed_rows,uncertain_rows,dedupe_audit=(
+        _near_duplicate_recoveries(raw_v065_rows))
+    lower_recovery_audit.extend(dedupe_audit)
     precision_rows,precision_removed,precision_flags=_precision_audit(part_rows)
     bom_fields=["drawing_index","drawing","anchor_index","item_no","part_name",
                 "qpa","part_number","drawing_number","y","status",
                 "table_id","subrow_id","source_kind"]
     csv_write(ACTIVE_OUTPUT/"BOM_ROWS_BASELINE_V063.csv",bom_fields,baseline_rows)
     csv_write(ACTIVE_OUTPUT/"BOM_ROWS_BASELINE_V064.csv",bom_fields,baseline_v064_rows)
+    csv_write(ACTIVE_OUTPUT/"BOM_ROWS_RAW_V065.csv",bom_fields,raw_v065_rows)
     csv_write(ACTIVE_OUTPUT/"BOM_ROWS_CANDIDATES.csv",bom_fields,part_rows)
     csv_write(ACTIVE_OUTPUT/"BOM_ROWS_PRECISION_EXPERIMENT.csv",bom_fields,precision_rows)
     csv_write(ACTIVE_OUTPUT/"PRECISION_DEDUP_REMOVED.csv",
               bom_fields+["precision_reason"],precision_removed)
     csv_write(ACTIVE_OUTPUT/"PRECISION_REVIEW.csv",
               bom_fields+["precision_reason","own_dist","other_dist"],precision_flags)
+    csv_write(ACTIVE_OUTPUT/"LOWER_RECOVERY_FILTERED.csv",
+              bom_fields+["review_reason"],suppressed_rows)
+    csv_write(ACTIVE_OUTPUT/"LOWER_RECOVERY_REVIEW.csv",
+              bom_fields+["review_reason"],uncertain_rows)
     csv_write(ACTIVE_OUTPUT/"LOWER_RECOVERY_AUDIT.csv",
               ["drawing_index","drawing","anchor_index","table_id",
                "item_no","code","detail"],lower_recovery_audit)
@@ -1339,10 +1434,13 @@ def main():
              "no_list_drawings":no_list_drawings,
              "scan_busy_drawings":scan_busy_drawings,
              "part_row_candidates":len(part_rows),
-             "v065_unmodified_candidates":len(part_rows),
+             "v066_unchanged_candidates":len(part_rows),
              "precision_experiment_candidates":len(precision_rows),
              "precision_removed_exact_duplicates":len(precision_removed),
              "precision_flagged_not_removed":len(precision_flags),
+             "raw_v065_candidates":len(raw_v065_rows),
+             "filtered_duplicate_recoveries":len(suppressed_rows),
+             "uncertain_recoveries":len(uncertain_rows),
              "baseline_v063_rows":len(baseline_rows),
              "baseline_v064_rows":len(baseline_v064_rows),
              "additional_candidate_rows":len(part_rows)-len(baseline_rows),
