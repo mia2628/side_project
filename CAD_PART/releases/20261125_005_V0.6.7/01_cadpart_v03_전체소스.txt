@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""CAD-PART V0.6.7 — '부품목록' 기준 문자 탐색 전용 진단판.
+"""CAD-PART V0.6.7 — 안정화된 부품목록 추출 및 병합 하단의 선 경계 검증.
 AutoCAD 2019 + pywin32 / Windows / 오프라인.
 실행: python cadpart_v03.py
-도면을 수정하거나 저장하지 않으며, 실제 부품 추출은 하지 않습니다.
+도면을 수정하거나 저장하지 않으며, 부품목록 후보와 검토 결과를 CSV로 저장합니다.
 """
 from __future__ import annotations
 import csv
@@ -136,10 +136,8 @@ def collect(doc):
                                             "x1":min(x1,x2),"x2":max(x1,x2),
                                             "y":(y1+y2)/2,"space":space,
                                             "layer":layer})
-                    except RuntimeError:
-                        # Preserve existing E31 behavior if AutoCAD is busy.
-                        raise
                     except Exception:
+                        # Optional geometry must never interrupt proven text extraction.
                         pass
                 elif kind in ("AcDbBlockReference","AcDbMInsertBlock"):
                     counts["blocks"]+=1
