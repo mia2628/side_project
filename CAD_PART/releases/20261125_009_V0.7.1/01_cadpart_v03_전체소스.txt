@@ -1090,7 +1090,7 @@ def diagnose_drawing_ids(drawing_index,part_rows,occurrences):
                       "stem_normalized":_id_alnum(stem),
                       "part_key_normalized":_id_alnum(candidate),
                       "status":str(d.get("status",""))})
-    by_parent={int(o["occurrence_id"][1:]):o for o in occurrences}
+    parent_by_index={n["drawing_index"]:n["drawing"] for n in nodes}
     near=[]; fields=[]
     raw_ids=0
     with_usable=0
@@ -1144,7 +1144,7 @@ def diagnose_drawing_ids(drawing_index,part_rows,occurrences):
                     node=next(n for n in nodes if n["drawing_index"]==child)
                     near.append({
                         "occurrence_id":occurrence,"parent_drawing_index":parent,
-                        "parent_drawing":str(row.get("drawing","") or ""),
+                        "parent_drawing":parent_by_index.get(parent,""),
                         "child_drawing_index":child,
                         "child_drawing":node["drawing"],
                         "item_no":row["item_no"],"table_id":row["table_id"],
