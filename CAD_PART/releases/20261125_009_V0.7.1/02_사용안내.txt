@@ -1,0 +1,55 @@
+CAD-PART V0.7.1 | 2026-11-25 | 배포번호 009
+
+목적: V0.7.0에서 실제 관계 있는 DWG 2개 추가 후에도
+'직속연결후보 0 / 관계검토 0'으로 표시된 원인을 판별.
+
+[완전히 유지하는 기능]
+- V0.6.6의 BOM 문자 추출, '부품목록' 기준점과 5개 헤더, 좌측 다중표 인식, 병합 품명 처리, 중복 후보 필터는 그대로 사용.
+- V0.7.0의 기존 엄격한 직속 연결 판단은 그대로 유지.
+- 최상위 조립체를 임의 지정하지 않음.
+- AutoCAD COM 안정화와 조금 단축한 대기시간은 V0.7.0과 동일.
+
+[새로운 진단 방식 — 실제 관계 확정 아님]
+각 추출 품목의 PART_NUMBER와 DRAWING_NUMBER를 개별 검사한 뒤:
+A. 문자/대소문자/공백만 정규화한 기존 엄격 일치: 기존 직속 연결 후보
+B. 하이픈/언더바/공백 등 구분기호를 무시할 때 동일한 번호: SEPARATOR_INSENSITIVE_EXACT
+C. 추출된 전체 품번이 더 긴 DWG 파일명에 포함됨: IDENTIFIER_INSIDE_FILENAME
+B와 C는 모두 REVIEW_ONLY이며 DIRECT_DRAWING_LINKS.csv에 임의로 확정 입력하지 않음.
+번호 길이가 너무 짧거나 숫자가 없는 불분명한 식별자는 자동 제안하지 않음.
+같은 번호가 여러 파일에 해당하면 전부 검토 후보로 표시.
+부모 DWG 본인과 매칭한 항목은 관계 연결에서 제외.
+DWG 파일을 읽는 순서와 결과는 무관하게 전체 완료 후 분석.
+
+[실행]
+1. 기존 cadpart_v03.py와 CAD_RESULT를 백업.
+2. 01_cadpart_v03_전체소스.txt 전체 소스를 회사 승인 절차에 따라 준비.
+3. 파일명 cadpart_v03.py 그대로 사용.
+4. 기존 20개 + 추가 2개 = 22개 DWG를 CAD_INPUT에 배치.
+5. AutoCAD 2019 명령/팝업을 종료하고 실행:
+python cadpart_v03.py
+
+[선택적인 가상 관계 시험 — 실제 DWG 없이]
+python cadpart_v03.py --selftest
+두 가지 시험 PASS가 나와야 정상: 기존 그래프 자기검증, 새 파일명 포함 진단 자기검증.
+
+[출력 파일]
+CAD_RESULT/RUNS/최신실행번호/
+BOM_ROWS_CANDIDATES.csv : 기존 방식 그대로 추출한 구성품 후보
+DIRECT_BOM_OCCURRENCES.csv : 각 부모 DWG에 실제 속하는 직속 구성품 행
+DIRECT_DRAWING_LINKS.csv : V0.7.0의 엄격 일치 관계 후보
+RELATION_SUMMARY.json : exact_candidate_links, unlinked_occurrences
+MATCH_DRAWING_IDENTIFIERS.csv : 각 DWG 파일명의 정규화된 식별정보
+MATCH_FIELD_DIAGNOSTICS.csv : 각 부품번호/도면번호 필드 비교 결과(EMPTY/TOO_SHORT/NO_FILENAME_MATCH/REVIEW_MATCH_FOUND)
+MATCH_REVIEW_CANDIDATES.csv : 구분기호 차이/파일명 내부 포함 근거로 발견된 관계 검토 후보
+MATCH_DIAGNOSTIC_SUMMARY.json : 전체 비교 필드 수, 후보 존재 건수 등
+DIRECT_GRAPH.dot : 기존 엄격 관계의 그래프만 표시, 검토 후보는 미포함
+
+[피드백 — 다음 4개 값]
+1. 터미널 마지막 한 줄: DWG/읽음/행/직속연결후보/파일명검토후보
+2. RELATION_SUMMARY.json의 unlinked_occurrences 값
+3. MATCH_DIAGNOSTIC_SUMMARY.json의 near_candidate_occurrences 값
+4. 실제 연결되어야 하는 2개 도면이 MATCH_REVIEW_CANDIDATES.csv에서 보이는지 (예/아니오)
+회사 도면/품번/파일명/경로 또는 결과 CSV 자체를 공개 GitHub에 올리지 마세요.
+
+중요: 0건 원인이 특정되기 전 임의 연결하지 마세요.
+실제 AutoCAD 2019 실행 검증은 아직 진행 전인 시험판입니다.
