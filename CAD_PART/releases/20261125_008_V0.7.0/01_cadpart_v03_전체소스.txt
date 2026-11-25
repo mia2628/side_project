@@ -1059,6 +1059,40 @@ def build_direct_hierarchy(drawing_index, part_rows):
     return drawings,occurrences,links,link_validation,"\n".join(dot)+"\n",stats
 
 
+
+def hierarchy_selftest():
+    """Offline synthetic checks: no COM, no user drawing, no external modules."""
+    docs=[
+        {"drawing_index":1,"file":"ASSEMBLY_A.dwg","drawing_key":"ASSEMBLY_A",
+         "part_key_candidate":"ASSEMBLY_A","status":"HEADER_COMPLETE","header_complete_count":1},
+        {"drawing_index":2,"file":"CHILD_B.dwg","drawing_key":"CHILD_B",
+         "part_key_candidate":"CHILD_B","status":"HEADER_COMPLETE","header_complete_count":1},
+        {"drawing_index":3,"file":"ASSEMBLY_C.dwg","drawing_key":"ASSEMBLY_C",
+         "part_key_candidate":"ASSEMBLY_C","status":"HEADER_COMPLETE","header_complete_count":1},
+    ]
+    def row(parent,num,part):
+        return {"drawing_index":parent,"item_no":num,"subrow_id":1,
+                "table_id":"T1","part_number":part,"drawing_number":"",
+                "part_name":"TEST_COMPONENT","qpa":1,"source_kind":"PRIMARY",
+                "status":"CANDIDATE"}
+    _,occ,links,checks,_,stats=build_direct_hierarchy(
+        docs,[row(1,1,"CHILD_B"),row(3,1,"CHILD_B"),row(1,2,"PART_P")])
+    assert len(occ)==3, "All direct occurrences must remain"
+    assert len(links)==2 and stats["exact_candidate_links"]==2, "Shared child DWG linking"
+    assert {e["parent_drawing_index"] for e in links}=={1,3}, "Two parents retained"
+    assert stats["unlinked_occurrences"]==1, "Unlinked part retained"
+    _,_,cycle_links,_,_,_=build_direct_hierarchy(
+        docs,[row(1,1,"CHILD_B"),row(2,1,"ASSEMBLY_A")])
+    assert len(cycle_links)==2 and all(
+        e["status"]=="CYCLE_REVIEW" for e in cycle_links), "Cycle must be flagged"
+    docs.append(dict(docs[1],drawing_index=4,file="CHILD_B_copy.dwg"))
+    _,amb,amb_links,_,_,_=build_direct_hierarchy(docs,[row(1,1,"CHILD_B")])
+    assert amb[0]["match_status"]=="AMBIGUOUS_MULTIPLE_DRAWINGS", "Ambiguous drawings"
+    assert len(amb_links)==2, "Keep both ambiguous candidates"
+    print("V0.7.0|SELFTEST|PASS|공통부품2부모|미연결|순환|중복도면후보")
+    return 0
+
+
 def csv_write(path,header,rows):
     path.parent.mkdir(parents=True,exist_ok=True)
     with path.open("w",newline="",encoding="utf-8-sig") as fh:
@@ -1191,6 +1225,8 @@ def main():
     if integrity!="OK":
         print("V0.7.0|실행검증실패|E35")
         return 35
+    if "--selftest" in sys.argv:
+        return hierarchy_selftest()
     is_demo="--demo" in sys.argv
     paths=sorted(INPUT.rglob("*.dwg"),key=lambda p:str(p).casefold()) if INPUT.is_dir() and not is_demo else []
     if not paths and not is_demo:
