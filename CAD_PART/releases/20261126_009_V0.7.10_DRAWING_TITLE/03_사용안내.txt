@@ -1,0 +1,44 @@
+CAD-PART V0.7.10 | 2026-11-26 | 배포번호 009
+
+[변경한 도면 자체 품번 위치]
+V0.7.9에서 부품목록 앵커(x,y) 기준 품번 위치: (x+90, y-45).
+사용자 요청대로 X축 -20, Y축 +7:
+V0.7.10 품번 위치 = (x+70, y-38).
+
+[변경하지 않은 기능]
+도면 자체 품명 위치 = (x+30, y-30) 그대로.
+X/Y 허용오차 ±12/±7 유지.
+'부품목록' 앵커, 5개 헤더, 기존 부품 추출, 병합 행 및 좌측 부품표,
+AutoCAD COM, 속도 설정, 직속 부모-자식 매칭, Level별 10색 음영 유지.
+
+[배포 파일]
+01_cadpart_v03_전체소스.txt -> 승인된 절차로 cadpart_v03.py 준비
+02_cadpart_hierarchy_v01_전체소스.txt -> cadpart_hierarchy_v01.py 준비
+03_사용안내.txt -> 본 안내
+
+[실행]
+1. 기존 두 Python 파일 및 CAD_RESULT/RUNS 결과 백업.
+2. 사내 승인된 방식으로 전체 TXT 코드 2개를 준비.
+3. CAD_INPUT 폴더에 기존 DWG를 둔 상태로 AutoCAD 2019 실행.
+4. 도면 자체 품번 위치를 새로 읽어야 하므로 DWG 재스캔:
+python cadpart_v03.py
+5. DRAWING_TITLE_RESULTS.csv에서 part_target_x=anchor_x+70,
+   part_target_y=anchor_y-38인지 확인.
+6. 계층형 엑셀 생성:
+python cadpart_hierarchy_v01.py
+
+[출력]
+CAD_RESULT/RUNS/최신 실행번호/
+- DRAWING_TITLE_RESULTS.csv
+- BOM_ROWS_CANDIDATES.csv
+- DIRECT_LINK_CANDIDATES_V072.csv
+- BOM_HIERARCHY_V0710.xlsx
+- BOM_HIERARCHY_V0710.csv
+- HIERARCHY_SUMMARY_V0710.json
+
+[피드백]
+도면 전체 수/읽기 성공 수, 품번 추출 정확 도면 수,
+FOUND/PARTIAL/NOT_FOUND 건수, 기존 부품 추출 및 상하위 연결 유지 여부.
+
+실제 사내 도면·품번·추출 파일은 공개 GitHub에 업로드하지 마세요.
+이번 수정본의 AutoCAD 2019 실도면 검증은 아직 전입니다.
