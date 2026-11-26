@@ -1,0 +1,63 @@
+CAD-PART V0.7.11 | 2026-11-26 | 배포번호 010
+
+[이번 변경의 정확한 좌표 규칙]
+기존 '부품목록' 텍스트를 찾는 알고리즘과 5개 헤더 인식 규칙은 변경하지 않음.
+도면 자체 품명은 기존과 동일하게 앵커 (x+30, y-30)에서 찾음.
+도면 자체 품번은 이전처럼 앵커 (x+70, y-38)를 사용하지 않음.
+실제로 검출된 도면 자체 품명의 문자 삽입점 좌표 (name_x,name_y)에서
+  부품번호 탐색 좌표 = (name_x, name_y - 14)
+즉, X축을 품명 X좌표로 되돌리고 Y만 14 내린 위치를 검사함.
+기존 탐색 반경 X ±12, Y ±7 유지.
+
+[품번 후보 선택 규칙]
+1. 동일 Model 또는 Layout 안에서 목표 좌표 주변의 기존 문자 데이터만 검사
+2. '도면크기', '도번', '도면번호', '도면명' 같은 제목란 문구 제외
+3. 숫자 8자리(예: 12345678) 우선
+4. 숫자가 6개 이상 포함된 영숫자 품번 등 유사한 형식도 고려
+5. 그 외 숫자가 4개 이상 포함된 짧은 품번 형식은 낮은 우선순위로 고려
+6. 유사한 품번 후보가 여러 개면 REVIEW_AMBIGUOUS 기록
+7. 근처에 적절한 품번이 없으면 NOT_FOUND, 파일명으로 값을 임의 생성하지 않음
+8. 품명 자체를 인식하지 못한 도면은 NAME_NOT_FOUND로 표시하고 품번도 추정하지 않음
+
+[완전히 유지하는 코드]
+- 부품목록 기준점 탐색
+- 품번·품명·수량·부품번호·도면번호 헤더 및 행 추출
+- 왼쪽 추가 부품표, 병합 품명 복원, 중복 검사
+- AutoCAD 2019 COM 안정화 및 이전 속도 설정
+- V0.7.2 직속 부모-자식 관계 후보 매칭
+- Level별 10색 음영 구분 및 계층형 엑셀 출력
+
+[전체 파일 3개]
+01_cadpart_v03_전체소스.txt -> 기존 cadpart_v03.py 파일명 유지
+02_cadpart_hierarchy_v01_전체소스.txt -> cadpart_hierarchy_v01.py
+03_사용안내.txt -> 본 안내
+
+[사내 실행]
+1. 기존 두 Python 파일과 CAD_RESULT/RUNS 결과는 백업
+2. 회사에서 승인한 코드 반입/실행 절차로 새 전체 TXT 준비
+3. CAD_INPUT 안에 기존 DWG를 두고 AutoCAD 2019 실행
+4. 품번을 새 좌표에서 추출해야 하므로 재스캔:
+python cadpart_v03.py
+5. 최신 RUNS 폴더 DRAWING_TITLE_RESULTS.csv 확인
+   특히 drawing_part_name, drawing_part_number, name_x, name_y,
+   part_target_x, part_target_y, number_candidate_count, number_status
+6. 계층형 엑셀 재생성:
+python cadpart_hierarchy_v01.py
+
+[출력]
+CAD_RESULT/RUNS/최신실행번호/
+- DRAWING_TITLE_RESULTS.csv
+- BOM_ROWS_CANDIDATES.csv
+- DIRECT_LINK_CANDIDATES_V072.csv
+- BOM_HIERARCHY_V0711.xlsx
+- BOM_HIERARCHY_V0711.csv
+- HIERARCHY_SUMMARY_V0711.json
+
+[시험 피드백]
+전체 DWG 읽기 건수 / 부품 후보 건수
+DRAWING_TITLE_RESULTS.csv의 번호 FOUND / NOT_FOUND / REVIEW_AMBIGUOUS 건수
+실제 도면 자체 품번과 맞는 건수
+상하위 연결 및 Level별 음영색 정상 유지 여부
+
+주의: 이 버전은 실제 DWG 현장 시험 전입니다.
+회사 원본 도면, 품번, 추출 결과 원문을 PUBLIC GitHub에 업로드하지 마세요.
