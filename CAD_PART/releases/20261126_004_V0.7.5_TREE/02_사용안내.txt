@@ -1,0 +1,71 @@
+CAD-PART HIERARCHY V0.7.5 / 2026-11-26 / 배포 004
+
+[수정 기준]
+이 파일은 V0.7.4/V0.7.4.1이 아니라 사용자에게 더 적합했던
+V0.7.3의 계층형 엑셀 생성 전체 소스를 기준으로 만들었습니다.
+
+[정확히 고친 것]
+기존 예:
+LEVEL_01  8000000 인쇄회로기판조립체
+LEVEL_02  [도면 후보] 8000000.dwg
+LEVEL_03  인쇄회로기판
+
+V0.7.5:
+LEVEL_01  8000000 인쇄회로기판조립체
+LEVEL_02  인쇄회로기판
+
+- [도면 후보] 행 자체가 없어집니다.
+- 하위의 실제 부품들은 왼쪽 한 열로 당겨집니다.
+- 부모와 자식의 실제 연결 근거, DWG 파일명, 후보 상태는
+  우측 메타정보 열 및 연결근거 시트에 그대로 남습니다.
+- 다중 도면 후보의 경우 V0.7.3처럼 각각의 실제 부품을 전개하되
+  검토 후보 관계이므로 확정이라고 표시하지 않습니다.
+- 기존 V0.7.3의 [도면 시작 후보] 그룹, 파랑/초록/주황 음영,
+  실제 부품·수량·순번 배열은 변경하지 않았습니다.
+- V0.7.4.1에서 발생했던 group_start 관련 CSV 저장 오류가
+  생기지 않도록 DictWriter에 extrasaction=ignore를 적용했습니다.
+
+[프로그램과 입력]
+cadpart_v03.py (기존 DWG 추출/관계 매칭 코드)는 절대 변경하지 않습니다.
+이 프로그램은 V0.7.2 결과 CSV로 계층형 Excel을 만드는 독립 후처리입니다.
+AutoCAD 사용, 도면 재스캔, 인터넷 접속, pip 패키지 설치가 필요 없습니다.
+Python 표준 라이브러리만 사용합니다.
+
+동일한 D:\CAD_PART 폴더에 다음을 배치:
+  cadpart_v03.py                    (기존 그대로)
+  cadpart_hierarchy_v01.py          (새 소스)
+  CAD_RESULT\RUNS\V0.7.2 결과 폴더\
+    DRAWING_NODES.csv
+    DIRECT_BOM_OCCURRENCES.csv
+    DIRECT_LINK_CANDIDATES_V072.csv
+    DIRECT_DRAWING_LINKS.csv        (있는 경우만 병합)
+
+[실행]
+기존 cadpart_hierarchy_v01.py는 백업.
+GitHub 01_cadpart_hierarchy_v01_전체소스.txt를 사내 승인 절차로 준비.
+선택 가상 데이터 자체 검사:
+python cadpart_hierarchy_v01.py --selftest
+정상: V0.7.5|SELFTEST|PASS|BASELINE_AND_MULTIPLE_CANDIDATES
+
+실제 결과 변환은 딱 한 줄:
+python cadpart_hierarchy_v01.py
+
+[생성 결과]
+CAD_RESULT/RUNS/최신 V0.7.2 결과 폴더/
+- BOM_HIERARCHY_V075.xlsx : 계층형_BOM / 검증요약 / 연결근거 3개 시트
+- BOM_HIERARCHY_V075.csv : 동일 계층 데이터
+- HIERARCHY_SUMMARY_V075.json : 요약 통계
+이전 V0.7.3 또는 V0.7.4 결과 파일은 덮어쓰지 않습니다.
+
+[검증]
+1. 사용자 예시처럼 부품 8000000 아래의 실제 인쇄회로기판이
+   불필요한 [도면 후보] 행 없이 바로 다음 열에 나타나는지
+2. 다중 후보 관계가 있는 경우 잘못된 하위 도면이 섞였는지
+3. 기존 음영색과 V0.7.3 도면 시작 구분이 유지되는지
+4. 오른쪽 부모DWG·연결DWG 및 연결근거가 보존되는지
+
+[주의]
+파일명 내부 포함으로 찾은 DWG는 관계 검토 후보로 표시됩니다.
+연결관계가 진짜인지 확정하기 전에 원본 도면과 확인해 주세요.
+이 릴리스는 사용자 원본 DWG/CSV를 사용한 현장 검증 전입니다.
+회사 도면/품번/사내 파일 및 결과를 공개 GitHub에 올리지 마세요.
