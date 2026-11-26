@@ -1,0 +1,29 @@
+CAD-PART HIERARCHY V0.7.4.1 - CSV 저장 오류 수정 (2026-11-26)
+
+원인: V0.7.4에서는 도면 그룹의 첫 부품에 음영색을 적용하기 위해 내부 데이터에 group_start 항목을 추가했으나, BOM_HIERARCHY_V074.csv의 CSV 열 목록에 해당 항목이 없었습니다. 따라서 csv.DictWriter의 기본 동작이 ValueError: dict contains fields not in fieldnames: 'group_start'를 발생시켰습니다.
+
+수정: csv.DictWriter(..., extrasaction="ignore")로 설정. XLSX에는 group_start를 계속 사용하여 기존 음영색 구분을 유지하고, CSV에는 원래 지정한 필드만 기록합니다. 부품 추출 코드 cadpart_v03.py, 원본 DWG, 상하위 연결 CSV, 계층 전개 로직은 수정하지 않았습니다.
+
+파일:
+01_cadpart_hierarchy_v01_전체소스.txt : V0.7.4.1 전체 Python 코드
+02_사용안내.txt : 본 설명
+
+실행:
+1) 기존 cadpart_hierarchy_v01.py 백업.
+2) 승인된 절차로 새 TXT 전체 소스를 준비하고 실행 파일명을 cadpart_hierarchy_v01.py로 유지.
+3) 기존 CAD_RESULT/RUNS 아래 V0.7.2 결과 CSV를 그대로 사용.
+4) AutoCAD 재실행 불필요.
+5) 다음 한 줄 실행:
+python cadpart_hierarchy_v01.py
+
+선택적 가상검증:
+python cadpart_hierarchy_v01.py --selftest
+
+성공 시 최신 V0.7.2 RUNS 폴더 안에 아래 파일을 생성하거나 갱신:
+BOM_HIERARCHY_V074.xlsx
+BOM_HIERARCHY_V074.csv
+HIERARCHY_SUMMARY_V074.json
+
+다음 피드백: 마지막 출력 1줄과 엑셀에서 LEVEL_00부터 실제 부품이 시작하는지, 음영색이 유지되는지만 알려주세요.
+
+실제 도면·품번·사내 파일 또는 CSV 원문은 공개 GitHub에 업로드하지 마세요. 이 버전은 현장 실제 CSV로 실행 검증하기 전의 수정판입니다.
