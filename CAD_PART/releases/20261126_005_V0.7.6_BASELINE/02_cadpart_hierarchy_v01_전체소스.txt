@@ -380,7 +380,7 @@ def main():
     }
     outfile=run/"BOM_HIERARCHY_V076.xlsx"
     make_xlsx(outfile,tree,occ,audit,stat)
-    with (run/"BOM_HIERARCHY_V075.csv").open(
+    with (run/"BOM_HIERARCHY_V076.csv").open(
         "w",newline="",encoding="utf-8-sig") as f:
         keys=["level","node_title","kind","part_number","drawing_number",
               "part_name","qpa","parent_dwg","linked_dwg","link_status",
@@ -390,7 +390,7 @@ def main():
         writer.writerows(tree)
     (run/"HIERARCHY_SUMMARY_V076.json").write_text(
         json.dumps(stat,ensure_ascii=False,indent=2),encoding="utf-8")
-    print("V0.7.5|DWG%d|직속품목%d|연결후보%d|계층행%d|엑셀OK" %
+    print("V0.7.6|DWG%d|직속품목%d|연결후보%d|계층행%d|엑셀OK" %
           (len(nodes),len(occ),len(links),len(tree)))
     print("OUTPUT="+str(outfile))
     return 0
@@ -399,5 +399,5 @@ if __name__=="__main__":
     try:
         sys.exit(main())
     except Exception as exc:
-        print("V0.7.5|E99|"+type(exc).__name__+"|"+str(exc)[:90])
+        print("V0.7.6|E99|"+type(exc).__name__+"|"+str(exc)[:90])
         sys.exit(99)
