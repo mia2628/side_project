@@ -1,0 +1,75 @@
+CAD-PART V0.7.6 확장 검증 기준 배포 | 2026-11-26 | 배포번호 005
+
+[기준을 명확히 고정]
+- CAD DWG 읽기/부품목록 추출/직속 DWG 관계: V0.7.2 전체 코드 원본 그대로
+- 계층형 BOM 엑셀: V0.7.5를 기반으로 Level별 음영색만 개선한 V0.7.6
+- V0.6.6 기반의 검증된 품목 추출 로직 변경 없음.
+- 계층형 구조에서 V0.7.5처럼 불필요한 [도면 후보] 행 제거.
+- [도면 시작 후보] 행은 V0.7.3/V0.7.5 기준대로 유지.
+- 직속 연결은 아직 engineering-confirmed가 아닌 연결 후보이며, 최상위 도면/절대 Level을 확정하지 않음.
+
+[GitHub에 등록된 3개 파일]
+01_cadpart_v03_전체소스.txt
+  → 실행 파일명: cadpart_v03.py
+  → VERSION: V0.7.2 (의도적으로 변경하지 않음)
+02_cadpart_hierarchy_v01_전체소스.txt
+  → 실행 파일명: cadpart_hierarchy_v01.py
+  → VERSION: V0.7.6
+03_사용안내.txt
+  → 본 안내
+
+[엑셀 음영색 규칙]
+LEVEL_00 = 연한 파랑
+LEVEL_01 = 연한 초록
+LEVEL_02 = 연한 주황(앰버)
+LEVEL_03 = 연한 보라
+LEVEL_04 = 연한 청록
+LEVEL_05 = 연한 분홍
+LEVEL_06 = 연한 연두
+LEVEL_07 = 연한 회청
+LEVEL_08 = 연한 베이지
+LEVEL_09 = 연한 남보라
+같은 레벨의 모든 품목은 같은 음영색을 사용합니다.
+도면 시작 그룹의 첫 행은 같은 레벨 색을 유지하면서 굵은 글자로 구분합니다.
+연결 상태/근거 및 검토 경고는 우측 정보 열에 보존합니다.
+
+[사내 폴더 구성]
+D:\CAD_PART\
+  cadpart_v03.py
+  cadpart_hierarchy_v01.py
+  CAD_INPUT\                  (DWG 입력 도면)
+  CAD_RESULT\RUNS\...\       (기존 실행 결과 및 새 실행 결과)
+
+[실행 시나리오 A: 현재 22개 도면 결과를 엑셀로 다시 만들기]
+AutoCAD 필요 없음. 기존 V0.7.2 결과가 남아 있으면:
+python cadpart_hierarchy_v01.py
+생성: CAD_RESULT/RUNS/최신 V0.7.2 실행 폴더/
+  BOM_HIERARCHY_V076.xlsx
+  BOM_HIERARCHY_V076.csv
+  HIERARCHY_SUMMARY_V076.json
+
+[실행 시나리오 B: DWG 개수를 늘려 새로 검증]
+1. 기존 코드/결과 백업 및 회사 승인된 방식으로 전체 TXT 소스 준비.
+2. 입력 CAD_INPUT에 추가 도면 복사본을 배치.
+3. AutoCAD 2019 팝업/명령 없는 상태에서:
+python cadpart_v03.py
+4. 위 작업이 정상 종료된 후:
+python cadpart_hierarchy_v01.py
+5. 엑셀 BOM_HIERARCHY_V076.xlsx에서 부모/자식 배치 및 색 구분 확인.
+
+[선택적 가상 데이터 테스트]
+python cadpart_v03.py --selftest
+python cadpart_hierarchy_v01.py --selftest
+
+[확인할 숫자]
+- DWG 읽기 성공 수 / 부품 후보 수
+- DIRECT_LINK_CANDIDATES_V072.csv 연결 후보 수
+- BOM_HIERARCHY_V076.xlsx 레벨별 배치가 맞는지
+- 같은 레벨은 같은 색, 다음 레벨은 다른 색인지
+- 실제 잘못 연결된 상하위 관계 수, 미검출된 관계 수
+- 실행시간(선택)
+
+[주의]
+실제 DWG, 품번, 사내 경로, 작업 결과 CSV/XLSX를 PUBLIC GitHub에 올리지 마세요.
+이 배포는 원본 22개 DWG의 계층형 엑셀 현장 재검증과 추가 도면 확장시험 전입니다.
+기존 V0.7.2의 직속 후보와 V0.7.6의 계층 출력 결과를 동일한 원본으로 비교하십시오.
