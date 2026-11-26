@@ -1,0 +1,77 @@
+CAD-PART V0.7.7 / 2026-11-26 / 배포번호 006
+
+[핵심 목적]
+사용자가 검증한 기존 부품 추출·직속 관계 및 Level별 음영색을 유지하면서,
+[도면 시작 후보] DWG파일명 대신 실제 DWG 제목란의 '도면 자체 품명 + 품번'을 추출해
+엑셀 Level 0의 도면 시작 행에 표시합니다.
+
+[새로운 위치 기준: AutoCAD 도면의 XY 좌표 단위]
+현재 성공 중인 '부품목록' 앵커 원점 (x,y)를 절대 변경하지 않습니다.
+- 도면 자체 품명: (x+30, y-30)
+- 도면 자체 품번: (x+30, y-45) = 품명 위치에서 y -15
+이 값은 기존 부품목록의 품번/품명/수량/부품번호/도면번호 열과 무관합니다.
+앵커가 속한 동일 Model/Layout 공간에서 문자 삽입점을 비교합니다.
+현재 탐색 허용 오차는 X ±12, Y ±7 (도면 좌표 단위)입니다.
+허용 오차나 위치가 실제 도면에서 다르면 이후 실측 결과로 수정합니다.
+헤더와 부품목록의 기존 인식 로직은 수정하지 않습니다.
+
+[GitHub 배포 파일]
+01_cadpart_v03_전체소스.txt -> 승인된 실행 파일명 cadpart_v03.py
+   - V0.7.2에서 검증된 부품 추출/직속 매칭을 유지
+   - 별도 DRAWING_TITLE_RESULTS.csv 추가
+02_cadpart_hierarchy_v01_전체소스.txt -> 실행 파일명 cadpart_hierarchy_v01.py
+   - V0.7.6의 Level별 10색 음영 및 기존 계층 전개 유지
+   - [도면 시작 후보] 텍스트 대신 품번 + 품명을 표시
+   - DWG명은 부모DWG/연결DWG 우측 정보 열에서 확인 가능
+03_사용안내.txt -> 본 안내
+
+[중요]
+이번 수정에는 새로운 좌표 텍스트 추출 단계가 추가되므로
+기존 V0.7.2 결과만 재배열하면 새 품명/품번은 나타나지 않습니다.
+새 도면 대표 품명/품번을 얻으려면 이번 한 번 DWG를 다시 스캔해야 합니다.
+최종 결과가 나오면 그 이후에는 엑셀 생성 프로그램만 재실행하면 됩니다.
+
+[실행 폴더]
+D:\CAD_PART\
+  cadpart_v03.py                  (V0.7.7 소스)
+  cadpart_hierarchy_v01.py        (V0.7.7 소스)
+  CAD_INPUT\                      (74개 DWG)
+  CAD_RESULT\RUNS\...\
+
+[실행 순서]
+1. 현재 검증된 두 파일과 CAD_RESULT 기존 결과는 백업합니다.
+2. GitHub 전체 TXT 코드 2개를 회사의 승인된 절차로 반입/실행 준비.
+3. AutoCAD 2019 사용, 팝업이나 다른 명령을 정리하고 실행:
+python cadpart_v03.py
+4. 마지막 요약에서 DWG 읽음과 BOM 행 수가 이전과 동일한지 먼저 확인.
+5. 새로 만들어진 가장 최신 RUNS 폴더의 DRAWING_TITLE_RESULTS.csv 열기.
+   drawing_part_name, drawing_part_number, status를 우선 확인합니다.
+6. 엑셀 생성 실행:
+python cadpart_hierarchy_v01.py
+
+[출력]
+CAD_RESULT/RUNS/최신실행번호/
+- BOM_ROWS_CANDIDATES.csv : 기존 부품목록 그대로 추출
+- DRAWING_TITLE_RESULTS.csv : 별도 도면 대표 품명/품번 좌표 추출
+- DIRECT_LINK_CANDIDATES_V072.csv : 기존 관계 매칭 결과
+- BOM_HIERARCHY_V077.xlsx : 도면 시작 행의 품번/품명 표시 + Level별 음영색
+- BOM_HIERARCHY_V077.csv : 동일한 계층 원본 데이터
+- HIERARCHY_SUMMARY_V077.json : 요약/도면 대표 정보 검출 현황
+
+[미검출 안전 정책]
+- 둘 다 찾음: FOUND, 도면 제목에 실제 품번 + 품명을 씁니다.
+- 한쪽만 찾음: PARTIAL. 남은 부분은 비워 검토합니다.
+- 둘 다 못 찾음: NOT_FOUND, '[도면 품명·품번 미검출 — 검토]' 표시.
+- 근처에 서로 유력한 텍스트가 두 개: REVIEW_AMBIGUOUS
+- DWG 파일명으로 임의 품번/품명을 만들어 넣지 않습니다.
+- 원본 DWG를 저장하거나 변경하지 않습니다.
+
+[다음 피드백]
+1. 마지막 V0.7.7 실행 요약 (읽음/행/연결 후보/검토 등).
+2. DRAWING_TITLE_RESULTS.csv의 FOUND / PARTIAL / NOT_FOUND 건수.
+3. 실제 도면 제목란 품명/품번과 올바르게 일치한 도면 수.
+4. BOM_HIERARCHY_V077.xlsx 도면 시작 행에 품명/품번이 잘 보이는지.
+5. Level별 음영색과 기존 상하위 레벨 연결이 유지되는지.
+
+주의: 이 파일들의 사내 실제 DWG 실행은 아직 검증 전입니다.
+실제 도면, 부품번호, 사업 관련 CSV/XLSX는 PUBLIC GitHub에 올리지 마세요.
